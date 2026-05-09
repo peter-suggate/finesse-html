@@ -1,0 +1,97 @@
+import * as vscode from 'vscode';
+import { createPreviewPanel, type PreviewPanel } from './panel';
+import type { PreviewServer } from './server';
+
+export interface CommandsContext {
+  getPanel(key: string): PreviewPanel | undefined;
+  setPanel(key: string, panel: PreviewPanel): void;
+  deletePanel(key: string): void;
+  listPanels(): PreviewPanel[];
+  ensureServer(): Promise<PreviewServer>;
+}
+
+export function registerCommands(
+  context: vscode.ExtensionContext,
+  ctx: CommandsContext,
+): void {
+  context.subscriptions.push(
+    vscode.commands.registerCommand('htmlWysiwyg.openPreview', () =>
+      openPreview(context, ctx),
+    ),
+    vscode.commands.registerCommand('htmlWysiwyg.closePreview', () => closePreview(ctx)),
+    vscode.commands.registerCommand('htmlWysiwyg.editAnyway', () => editAnyway()),
+  );
+}
+
+async function openPreview(
+  extContext: vscode.ExtensionContext,
+  ctx: CommandsContext,
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'html') {
+    void vscode.window.showInformationMessage('Open an HTML file to preview.');
+    return;
+  }
+  const doc = editor.document;
+  const key = doc.uri.toString();
+  const existing = ctx.getPanel(key);
+  if (existing) {
+    existing.reveal();
+    return;
+  }
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceRoot) {
+    void vscode.window.showErrorMessage('Open a workspace folder before previewing.');
+    return;
+  }
+  const server = await ctx.ensureServer();
+  const port = server.port;
+  if (port === null) {
+    void vscode.window.showErrorMessage('Preview server failed to start.');
+    return;
+  }
+  const panel = createPreviewPanel(doc, {
+    context: extContext,
+    port,
+    workspaceRoot,
+    onDispose: () => ctx.deletePanel(key),
+  });
+  ctx.setPanel(key, panel);
+}
+
+function closePreview(ctx: CommandsContext): void {
+  const editor = vscode.window.activeTextEditor;
+  if (editor) {
+    const key = editor.document.uri.toString();
+    const panel = ctx.getPanel(key);
+    if (panel) {
+      panel.dispose();
+      return;
+    }
+  }
+  for (const panel of ctx.listPanels()) panel.dispose();
+}
+
+async function editAnyway(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'html') {
+    void vscode.window.showInformationMessage('Open an HTML file first.');
+    return;
+  }
+  const doc = editor.document;
+  const text = doc.getText();
+  if (/\bdata-html-wysiwyg-allow\s*=\s*["']?true["']?/i.test(text)) {
+    void vscode.window.showInformationMessage('Override already applied.');
+    return;
+  }
+  const match = /<html(\s[^>]*)?>/i.exec(text);
+  if (!match) {
+    void vscode.window.showErrorMessage('No <html> tag found.');
+    return;
+  }
+  const insertPos = match.index + '<html'.length;
+  const insertion = ' data-html-wysiwyg-allow="true"';
+  const edit = new vscode.WorkspaceEdit();
+  edit.insert(doc.uri, doc.positionAt(insertPos), insertion);
+  await vscode.workspace.applyEdit(edit);
+}
