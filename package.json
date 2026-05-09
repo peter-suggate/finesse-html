@@ -1,0 +1,120 @@
+{
+  "name": "vscode-html-wysiwyg",
+  "displayName": "HTML WYSIWYG",
+  "description": "Click-to-edit WYSIWYG preview for static HTML files with byte-perfect source preservation.",
+  "version": "0.0.1",
+  "publisher": "peter-suggate",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "dist/host/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/peter-suggate/vscode-html-wysiwyg.git"
+  },
+  "activationEvents": [
+    "onLanguage:html",
+    "onCommand:htmlWysiwyg.openPreview"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "htmlWysiwyg.openPreview",
+        "title": "HTML WYSIWYG: Open Preview"
+      },
+      {
+        "command": "htmlWysiwyg.closePreview",
+        "title": "HTML WYSIWYG: Close Preview"
+      },
+      {
+        "command": "htmlWysiwyg.editAnyway",
+        "title": "HTML WYSIWYG: Edit Templated File Anyway"
+      }
+    ],
+    "configuration": {
+      "title": "HTML WYSIWYG",
+      "properties": {
+        "htmlWysiwyg.port": {
+          "type": [
+            "number",
+            "string"
+          ],
+          "default": "auto",
+          "markdownDescription": "HTTP server port. Use `\"auto\"` to allocate an ephemeral port, or a specific port number."
+        },
+        "htmlWysiwyg.editableElements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Override block-container selector list. Empty = use computed defaults."
+        },
+        "htmlWysiwyg.templateTokens": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "\\{\\{[^}]*\\}\\}",
+            "\\{%[^%]*%\\}",
+            "<%[^%]*%>",
+            "\\$\\{[^}]*\\}",
+            "<\\?[^?]*\\?>"
+          ],
+          "description": "Regex source patterns marking files as templated."
+        },
+        "htmlWysiwyg.serverIdleTimeout": {
+          "type": "number",
+          "default": 60000,
+          "description": "Milliseconds to keep the preview server alive after the last preview closes."
+        },
+        "htmlWysiwyg.reloadDebounceMs": {
+          "type": "number",
+          "default": 150,
+          "description": "Debounce window (ms) for external-edit reload triggers."
+        },
+        "htmlWysiwyg.openOnHtmlOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open the preview when an HTML file is opened."
+        },
+        "htmlWysiwyg.aiCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command id to invoke for \"Rewrite with AI\" (Phase 3A). Empty = auto-detect at activation."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.iframe.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "lint": "eslint \"src/**/*.ts\"",
+    "package": "vsce package --no-dependencies --out vscode-html-wysiwyg.vsix",
+    "clean": "rimraf dist *.vsix"
+  },
+  "dependencies": {
+    "parse5": "^7.1.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^20.12.7",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "@vscode/vsce": "^2.27.0",
+    "esbuild": "^0.20.2",
+    "eslint": "^9.0.0",
+    "ovsx": "^0.9.1",
+    "prettier": "^3.2.5",
+    "rimraf": "^5.0.5",
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^8.0.0"
+  }
+}

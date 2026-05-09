@@ -1,0 +1,16 @@
+src/
+fixtures/
+tsconfig.json
+tsconfig.iframe.json
+tsconfig.webview.json
+esbuild.config.mjs
+.eslintrc.cjs
+eslint.config.mjs
+.prettierrc
+.github/
+SPEC.md
+.gitignore
+.vscode/
+.vscode-test/
+node_modules/
+**/.DS_Store
