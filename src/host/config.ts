@@ -14,7 +14,6 @@ const DEFAULT_TEMPLATE_PATTERNS: readonly RegExp[] = [
   /\{\{[^}]*\}\}/,
   /\{%[^%]*%\}/,
   /<%[^%]*%>/,
-  /\$\{[^}]*\}/,
   /<\?[^?]*\?>/,
 ];
 

@@ -25,13 +25,27 @@ export function registerCommands(
   );
 }
 
+const PREVIEWABLE_LANGUAGES: ReadonlySet<string> = new Set([
+  'html',
+  'javascript',
+  'typescript',
+  'javascriptreact',
+  'typescriptreact',
+]);
+
+export function isPreviewableLanguage(languageId: string): boolean {
+  return PREVIEWABLE_LANGUAGES.has(languageId);
+}
+
 async function openPreview(
   extContext: vscode.ExtensionContext,
   ctx: CommandsContext,
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.languageId !== 'html') {
-    void vscode.window.showInformationMessage('Open an HTML file to preview.');
+  if (!editor || !PREVIEWABLE_LANGUAGES.has(editor.document.languageId)) {
+    void vscode.window.showInformationMessage(
+      'Open an HTML, JS, or TS file to preview.',
+    );
     return;
   }
   const doc = editor.document;

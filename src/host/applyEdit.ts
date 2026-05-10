@@ -1,5 +1,25 @@
 import * as vscode from 'vscode';
-import type { EditCommit, EditRemove, OffsetMap } from '../shared/protocol';
+import type {
+  EditBlockHtml,
+  EditBlockTag,
+  EditCommit,
+  EditRemove,
+  OffsetMap,
+} from '../shared/protocol';
+import {
+  ALLOWED_BLOCK_TAGS,
+  computeBlockTagSplices,
+} from './blockTagTransform';
+import { computeBlockHtmlSplices } from './computeBlockHtmlSplices';
+
+/**
+ * Optional pre-splice transform applied to user-provided replacement text.
+ * Used by JS/TS panels to escape backticks, backslashes, and `${` so the
+ * splice can't break out of the template literal it's nested in.
+ */
+export type ReplacementEscaper = (text: string) => string;
+
+const identity: ReplacementEscaper = (s) => s;
 
 export interface ApplyEditOpts {
   document: vscode.TextDocument;
@@ -8,6 +28,7 @@ export interface ApplyEditOpts {
   commit: EditCommit;
   /** Called immediately before applyEdit with the version we expect post-apply. */
   beforeApply: (expectedVersion: number) => void;
+  escapeReplacement?: ReplacementEscaper;
 }
 
 export interface ApplyRemoveOpts {
@@ -15,6 +36,23 @@ export interface ApplyRemoveOpts {
   currentVersion: number;
   currentOffsetMap: OffsetMap | null;
   commit: EditRemove;
+  beforeApply: (expectedVersion: number) => void;
+}
+
+export interface ApplyBlockHtmlOpts {
+  document: vscode.TextDocument;
+  currentVersion: number;
+  currentOffsetMap: OffsetMap | null;
+  commit: EditBlockHtml;
+  beforeApply: (expectedVersion: number) => void;
+  escapeReplacement?: ReplacementEscaper;
+}
+
+export interface ApplyBlockTagOpts {
+  document: vscode.TextDocument;
+  currentVersion: number;
+  currentOffsetMap: OffsetMap | null;
+  commit: EditBlockTag;
   beforeApply: (expectedVersion: number) => void;
 }
 
@@ -71,11 +109,12 @@ export async function applyEditCommit(opts: ApplyEditOpts): Promise<ApplyEditRes
   }
   sortable.sort((a, b) => b.startOffset - a.startOffset);
 
+  const escape = opts.escapeReplacement ?? identity;
   const edit = new vscode.WorkspaceEdit();
   for (const e of sortable) {
     const startPos = document.positionAt(e.startOffset);
     const endPos = document.positionAt(e.endOffset);
-    edit.replace(document.uri, new vscode.Range(startPos, endPos), e.newText);
+    edit.replace(document.uri, new vscode.Range(startPos, endPos), escape(e.newText));
   }
   const expectedVersion = document.version + 1;
   opts.beforeApply(expectedVersion);
@@ -135,6 +174,139 @@ export async function applyRemoveCommit(opts: ApplyRemoveOpts): Promise<ApplyEdi
     const startPos = document.positionAt(expanded.startOffset);
     const endPos = document.positionAt(expanded.endOffset);
     edit.replace(document.uri, new vscode.Range(startPos, endPos), '');
+  }
+  const expectedVersion = document.version + 1;
+  opts.beforeApply(expectedVersion);
+  const success = await vscode.workspace.applyEdit(edit);
+  if (!success) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: expectedVersion,
+      actual: document.version,
+    };
+  }
+  return { ok: true, newVersion: document.version };
+}
+
+export async function applyBlockHtmlCommit(opts: ApplyBlockHtmlOpts): Promise<ApplyEditResult> {
+  const { document, currentVersion, currentOffsetMap, commit } = opts;
+  if (!currentOffsetMap) {
+    return {
+      ok: false,
+      reason: 'no-offsets',
+      expected: commit.documentVersion,
+      actual: currentVersion,
+    };
+  }
+  if (commit.documentVersion !== currentVersion || document.version !== currentVersion) {
+    return {
+      ok: false,
+      reason: 'stale',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+  const result = computeBlockHtmlSplices({
+    source: document.getText(),
+    offsetMap: currentOffsetMap,
+    blockId: commit.blockId,
+    newInnerHtml: commit.newInnerHtml,
+    newTagName: commit.newTagName,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: result.reason === 'bad-tag' ? 'apply-failed' : 'no-offsets',
+      expected: commit.documentVersion,
+      actual: currentVersion,
+    };
+  }
+
+  const escape = opts.escapeReplacement ?? identity;
+  const edit = new vscode.WorkspaceEdit();
+  for (const op of result.splices) {
+    const startPos = document.positionAt(op.startOffset);
+    const endPos = document.positionAt(op.endOffset);
+    edit.replace(document.uri, new vscode.Range(startPos, endPos), escape(op.replacement));
+  }
+  const expectedVersion = document.version + 1;
+  opts.beforeApply(expectedVersion);
+  const success = await vscode.workspace.applyEdit(edit);
+  if (!success) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: expectedVersion,
+      actual: document.version,
+    };
+  }
+  return { ok: true, newVersion: document.version };
+}
+
+export async function applyBlockTagCommit(opts: ApplyBlockTagOpts): Promise<ApplyEditResult> {
+  const { document, currentVersion, currentOffsetMap, commit } = opts;
+  if (!currentOffsetMap) {
+    return {
+      ok: false,
+      reason: 'no-offsets',
+      expected: commit.documentVersion,
+      actual: currentVersion,
+    };
+  }
+  if (commit.documentVersion !== currentVersion || document.version !== currentVersion) {
+    return {
+      ok: false,
+      reason: 'stale',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+  const newTag = commit.newTagName.toLowerCase();
+  if (!ALLOWED_BLOCK_TAGS.has(newTag)) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+  const block = currentOffsetMap.blocks.find((b) => b.blockId === commit.blockId);
+  const element = block ? currentOffsetMap.elements.find((e) => e.elementId === block.elementId) : undefined;
+  if (!block || !element) {
+    return {
+      ok: false,
+      reason: 'no-offsets',
+      expected: commit.documentVersion,
+      actual: currentVersion,
+    };
+  }
+  const source = document.getText();
+  const splices = computeBlockTagSplices({
+    source,
+    elementStart: element.startOffset,
+    elementEnd: element.endOffset,
+    innerStart: block.innerStartOffset,
+    innerEnd: block.innerEndOffset,
+    oldTag: block.tagName,
+    newTag,
+  });
+  if (!splices) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+
+  const edit = new vscode.WorkspaceEdit();
+  // Right-to-left so leading offsets stay valid.
+  const ordered = [...splices].sort((a, b) => b.startOffset - a.startOffset);
+  for (const s of ordered) {
+    const startPos = document.positionAt(s.startOffset);
+    const endPos = document.positionAt(s.endOffset);
+    edit.replace(document.uri, new vscode.Range(startPos, endPos), s.replacement);
   }
   const expectedVersion = document.version + 1;
   opts.beforeApply(expectedVersion);

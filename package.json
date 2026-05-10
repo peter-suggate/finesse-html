@@ -18,6 +18,10 @@
   },
   "activationEvents": [
     "onLanguage:html",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescriptreact",
     "onCommand:htmlWysiwyg.openPreview"
   ],
   "contributes": {
@@ -63,10 +67,9 @@
             "\\{\\{[^}]*\\}\\}",
             "\\{%[^%]*%\\}",
             "<%[^%]*%>",
-            "\\$\\{[^}]*\\}",
             "<\\?[^?]*\\?>"
           ],
-          "description": "Regex source patterns marking files as templated."
+          "description": "Regex source patterns marking the whole file as templated. JS template-literal `${...}` interpolations are always handled at the per-text-node level and don't lock the file."
         },
         "htmlWysiwyg.serverIdleTimeout": {
           "type": "number",

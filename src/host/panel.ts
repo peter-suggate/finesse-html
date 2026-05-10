@@ -2,6 +2,8 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type {
   DocumentState,
+  EditBlockHtml,
+  EditBlockTag,
   EditCommit,
   EditCancel,
   EditRemove,
@@ -12,9 +14,33 @@ import type {
   Ready,
   RuntimeError,
 } from '../shared/protocol';
-import { applyEditCommit, applyRemoveCommit } from './applyEdit';
+import {
+  applyBlockHtmlCommit,
+  applyBlockTagCommit,
+  applyEditCommit,
+  applyRemoveCommit,
+  type ReplacementEscaper,
+} from './applyEdit';
 import type { ResolvedConfig } from './config';
-import { detectTemplate, hasEditAnywayOverride, walkEditable } from './parse';
+import { escapeForJsTemplate } from './jsTemplateEscape';
+import {
+  detectTemplate,
+  hasEditAnywayOverride,
+  walkEditable,
+  walkEditableInJs,
+} from './parse';
+import { injectElementIds } from './server/inject';
+
+const JS_LANGUAGE_IDS: ReadonlySet<string> = new Set([
+  'javascript',
+  'typescript',
+  'javascriptreact',
+  'typescriptreact',
+]);
+
+function isJsLikeDocument(doc: vscode.TextDocument): boolean {
+  return JS_LANGUAGE_IDS.has(doc.languageId);
+}
 
 export interface PreviewPanel {
   readonly documentUri: vscode.Uri;
@@ -22,6 +48,15 @@ export interface PreviewPanel {
   readonly relativePath: string;
   currentVersion: number;
   currentOffsetMap: OffsetMap | null;
+  /** Composed HTML to serve from the preview server. For HTML docs this is just the
+   * document text; for JS/TS docs it's the concatenated bodies of the tagged
+   * template literals discovered by the extractor. `null` if nothing renderable. */
+  currentPreviewHtml: string | null;
+  /** For JS/TS docs only: composed HTML with `data-html-wysiwyg-id` attrs
+   * already spliced in (since the JS-source-coords offset map can't be used
+   * by the server to inject directly into composed bytes). `null` for HTML
+   * docs — the server handles injection itself. */
+  currentInjectedPreviewHtml: string | null;
   isTemplated: boolean;
   expectedSelfEditVersion: number | null;
   postToWebview(msg: HostMessage): void;
@@ -66,18 +101,40 @@ export function createPreviewPanel(
 
   let currentVersion = document.version;
   let currentOffsetMap: OffsetMap | null = null;
+  let currentPreviewHtml: string | null = null;
+  let currentInjectedPreviewHtml: string | null = null;
   let isTemplated = false;
   let expectedSelfEditVersion: number | null = null;
   let autoSave = false;
+  const jsMode = isJsLikeDocument(document);
+  const escapeReplacement: ReplacementEscaper | undefined = jsMode
+    ? escapeForJsTemplate
+    : undefined;
 
   function reparse(text: string, version: number): void {
-    const patterns = deps.getConfig().templatePatterns;
-    const templated = detectTemplate(text, patterns);
+    const structuralPatterns = deps.getConfig().templatePatterns;
+    if (jsMode) {
+      const result = walkEditableInJs(text, version, {
+        templatePatterns: structuralPatterns,
+      });
+      currentOffsetMap = result.offsetMap;
+      currentPreviewHtml = result.composedHtml;
+      currentInjectedPreviewHtml = injectElementIds(
+        result.composedHtml,
+        result.composedOffsetMap,
+      );
+      isTemplated = false;
+      currentVersion = version;
+      return;
+    }
+    const templated = detectTemplate(text, structuralPatterns);
     const overrideTemplate = templated && hasEditAnywayOverride(text);
     isTemplated = templated && !overrideTemplate;
     currentOffsetMap = isTemplated
       ? null
-      : walkEditable(text, version, { templatePatterns: patterns });
+      : walkEditable(text, version, { templatePatterns: structuralPatterns });
+    currentPreviewHtml = text;
+    currentInjectedPreviewHtml = null;
     currentVersion = version;
   }
 
@@ -174,6 +231,12 @@ export function createPreviewPanel(
       case 'editRemove':
         await handleEditRemove(msg);
         return;
+      case 'editBlockHtml':
+        await handleEditBlockHtml(msg);
+        return;
+      case 'editBlockTag':
+        await handleEditBlockTag(msg);
+        return;
       case 'editCancel':
         handleEditCancel(msg);
         return;
@@ -206,6 +269,7 @@ export function createPreviewPanel(
         beforeApply: (expected) => {
           expectedSelfEditVersion = expected;
         },
+        escapeReplacement,
       });
       if (!result.ok) {
         expectedSelfEditVersion = null;
@@ -254,6 +318,65 @@ export function createPreviewPanel(
     }
   }
 
+  async function handleEditBlockHtml(msg: EditBlockHtml): Promise<void> {
+    try {
+      const result = await applyBlockHtmlCommit({
+        document,
+        currentVersion,
+        currentOffsetMap,
+        commit: msg,
+        beforeApply: (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+        escapeReplacement,
+      });
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        panel.webview.postMessage({
+          type: 'staleCommit',
+          expectedVersion: result.expected,
+          actualVersion: result.actual,
+        });
+      } else if (autoSave) {
+        await saveDocument();
+      }
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`HTML WYSIWYG block edit failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  async function handleEditBlockTag(msg: EditBlockTag): Promise<void> {
+    try {
+      const result = await applyBlockTagCommit({
+        document,
+        currentVersion,
+        currentOffsetMap,
+        commit: msg,
+        beforeApply: (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+      });
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        panel.webview.postMessage({
+          type: 'staleCommit',
+          expectedVersion: result.expected,
+          actualVersion: result.actual,
+        });
+      } else if (autoSave) {
+        await saveDocument();
+      }
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`HTML WYSIWYG tag transform failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
   function handleEditCancel(msg: EditCancel): void {
     void msg;
   }
@@ -277,6 +400,18 @@ export function createPreviewPanel(
     },
     set currentOffsetMap(v: OffsetMap | null) {
       currentOffsetMap = v;
+    },
+    get currentPreviewHtml() {
+      return currentPreviewHtml;
+    },
+    set currentPreviewHtml(v: string | null) {
+      currentPreviewHtml = v;
+    },
+    get currentInjectedPreviewHtml() {
+      return currentInjectedPreviewHtml;
+    },
+    set currentInjectedPreviewHtml(v: string | null) {
+      currentInjectedPreviewHtml = v;
     },
     get isTemplated() {
       return isTemplated;

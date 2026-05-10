@@ -14,15 +14,17 @@ describe('detectTemplate', () => {
     ['handlebars / mustache', '<p>{{ name }}</p>'],
     ['jinja / liquid', '<p>{% if x %}y{% endif %}</p>'],
     ['ejs / erb', '<p><%= name %></p>'],
-    ['template literal', '<p>${name}</p>'],
     ['php / xml-pi', '<p><?= $name ?></p>'],
-  ])('detects %s', (_label, html) => {
+  ])('detects %s as a structural template', (_label, html) => {
     expect(detectTemplate(html)).toBe(true);
+  });
+
+  it('does NOT lock the whole file for ${...} interpolations', () => {
+    expect(detectTemplate('<p>${name}</p>')).toBe(false);
   });
 
   it('uses caller-supplied patterns when provided', () => {
     expect(detectTemplate('<p>~~x~~</p>', [/~~[^~]*~~/])).toBe(true);
-    // Caller patterns replace defaults: standard handlebars no longer matches.
     expect(detectTemplate('<p>{{ x }}</p>', [/~~[^~]*~~/])).toBe(false);
   });
 
@@ -32,8 +34,13 @@ describe('detectTemplate', () => {
 });
 
 describe('textHasTemplateToken', () => {
-  it('matches against the supplied patterns only', () => {
+  it('matches structural patterns from the default set', () => {
     expect(textHasTemplateToken('hello {{x}}')).toBe(true);
     expect(textHasTemplateToken('hello x')).toBe(false);
+  });
+
+  it('always locks ${...} per text node, even with custom patterns', () => {
+    expect(textHasTemplateToken('hello ${name}!')).toBe(true);
+    expect(textHasTemplateToken('hello ${name}', [/~~[^~]*~~/])).toBe(true);
   });
 });

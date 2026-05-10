@@ -139,6 +139,8 @@ async function ensureServer(): Promise<PreviewServer> {
     port: state.config.port,
     runtimeBundlePath,
     getDocumentText: (relPath) => readDocumentText(workspaceRoot, relPath),
+    getInjectedPreviewHtml: (relPath) =>
+      findPanelByRel(workspaceRoot, relPath)?.currentInjectedPreviewHtml ?? null,
     getOffsetMap: (relPath) => findPanelByRel(workspaceRoot, relPath)?.currentOffsetMap ?? null,
     isTemplated: (relPath) => findPanelByRel(workspaceRoot, relPath)?.isTemplated ?? false,
   });

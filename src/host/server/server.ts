@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import { URL } from 'node:url';
-import type { FileMeta } from '../../shared/protocol';
+import type { FileMeta, OffsetMap } from '../../shared/protocol';
 import type { PreviewServer, PreviewServerOptions } from './index';
 import { injectElementIds, injectInstrumentation } from './inject';
 import { ReloadSocket } from './reloadSocket';
@@ -143,9 +143,16 @@ class PreviewServerImpl implements PreviewServer {
     const ext = path.extname(resolved).toLowerCase();
     if (ext === '.html' || ext === '.htm') {
       this.serveHtml(relPath, resolved, req, res);
-    } else {
-      this.serveStatic(resolved, ext, req, res);
+      return;
     }
+    if (ext === '.js' || ext === '.mjs' || ext === '.ts' || ext === '.jsx' || ext === '.tsx') {
+      const preInjected = this.opts.getInjectedPreviewHtml(relPath);
+      if (preInjected !== null) {
+        this.serveInjectedPreview(relPath, preInjected, req, res);
+        return;
+      }
+    }
+    this.serveStatic(resolved, ext, req, res);
   }
 
   private serveRuntime(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -186,13 +193,33 @@ class PreviewServerImpl implements PreviewServer {
       }
     }
     const offsetMap = this.opts.getOffsetMap(relPath);
+    const withIds = injectElementIds(source, offsetMap);
+    this.respondWithHtml(relPath, withIds, offsetMap, req, res);
+  }
+
+  private serveInjectedPreview(
+    relPath: string,
+    preInjectedHtml: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const offsetMap = this.opts.getOffsetMap(relPath);
+    this.respondWithHtml(relPath, preInjectedHtml, offsetMap, req, res);
+  }
+
+  private respondWithHtml(
+    relPath: string,
+    htmlWithIds: string,
+    offsetMap: OffsetMap | null,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
     const fileMeta: FileMeta = {
       type: 'fileMeta',
       path: relPath,
       isTemplated: this.opts.isTemplated(relPath),
     };
-    const withIds = injectElementIds(source, offsetMap);
-    const html = injectInstrumentation(withIds, { offsetMap, fileMeta });
+    const html = injectInstrumentation(htmlWithIds, { offsetMap, fileMeta });
     const etag = `W/"html-${offsetMap?.documentVersion ?? 0}-${html.length}"`;
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { ETag: etag });

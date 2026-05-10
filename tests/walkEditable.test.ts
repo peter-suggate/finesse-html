@@ -54,6 +54,28 @@ describe('walkEditable', () => {
     expect(tags).toEqual(['table', 'tr', 'td']);
   });
 
+  it('populates innerStartOffset/innerEndOffset on blocks (inner-content slice round-trips)', () => {
+    const html = '<!doctype html><html><body><p>hello</p></body></html>';
+    const map = walkEditable(html, 1);
+    const block = map.blocks.find((b) => b.tagName === 'p');
+    expect(block).toBeDefined();
+    expect(block!.innerStartOffset).toBeDefined();
+    expect(block!.innerEndOffset).toBeDefined();
+    const inner = html.slice(block!.innerStartOffset!, block!.innerEndOffset!);
+    expect(inner).toBe('hello');
+  });
+
+  it('inner offsets preserve attributes (replacing inner range leaves opening tag intact)', () => {
+    const html = '<!doctype html><html><body><p class="x">hi</p></body></html>';
+    const map = walkEditable(html, 1);
+    const block = map.blocks[0];
+    const replaced =
+      html.slice(0, block.innerStartOffset!) +
+      '<strong>HI</strong>' +
+      html.slice(block.innerEndOffset!);
+    expect(replaced).toContain('<p class="x"><strong>HI</strong></p>');
+  });
+
   it('preserves the document version on the emitted map', () => {
     const map = walkEditable('<!doctype html><html><body><p>x</p></body></html>', 42);
     expect(map.documentVersion).toBe(42);
@@ -72,5 +94,14 @@ describe('walkEditable', () => {
     const map = walkEditable(html, 1, { templatePatterns: [/~~[^~]*~~/] });
     const texts = map.textNodes.map((tn) => tn.originalText);
     expect(texts).toEqual(['ok']);
+  });
+
+  it('locks individual text nodes containing ${...} but leaves siblings editable', () => {
+    const html =
+      '<!doctype html><html><body><p>Hello ${name}</p><p>plain text</p></body></html>';
+    const map = walkEditable(html, 1);
+    const texts = map.textNodes.map((tn) => tn.originalText);
+    expect(texts).toEqual(['plain text']);
+    expect(map.elements.map((e) => e.tagName)).toEqual(['p', 'p']);
   });
 });

@@ -1,7 +1,26 @@
 // Public surface for Stream 1C (parse5 walker). Stream 1A imports from here.
 export { walkEditable, hasEditAnywayOverride } from './walkEditable';
 export type { WalkOptions } from './walkEditable';
-export { detectTemplate, defaultTemplatePatterns, textHasTemplateToken } from './templateDetect';
+export { walkEditableInJs } from './walkEditableInJs';
+export type { JsWalkResult, WalkJsOptions } from './walkEditableInJs';
+export {
+  composeTemplateLiterals,
+  composedToSource,
+  DEFAULT_TEMPLATE_TAGS,
+  extractTemplateLiterals,
+} from './extractTemplateLiterals';
+export type {
+  ComposeResult,
+  ComposedChunk,
+  ExtractOptions,
+  TemplateLiteralRange,
+} from './extractTemplateLiterals';
+export {
+  detectTemplate,
+  defaultTemplatePatterns,
+  defaultTextOnlyTemplatePatterns,
+  textHasTemplateToken,
+} from './templateDetect';
 export {
   BLOCK_TAGS,
   NON_EDITABLE_PARENT_TAGS,
