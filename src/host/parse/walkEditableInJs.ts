@@ -15,7 +15,7 @@ export interface JsWalkResult {
   /** OffsetMap with all offsets translated back to JS-source coordinates. */
   offsetMap: OffsetMap;
   /** OffsetMap with offsets in composed-HTML coordinates — for injecting
-   * `data-html-wysiwyg-id` attrs into the served preview HTML. */
+   * `data-finesse-id` attrs into the served preview HTML. */
   composedOffsetMap: OffsetMap;
   /** The composed HTML (concatenated template-literal bodies, divider-separated). */
   composedHtml: string;

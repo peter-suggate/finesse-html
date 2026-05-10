@@ -11,7 +11,7 @@ interface InitData {
 
 declare global {
   interface Window {
-    __HTML_WYSIWYG__?: InitData;
+    __FINESSE__?: InitData;
   }
 }
 
@@ -28,9 +28,9 @@ function reportError(message: string, stack?: string): void {
 }
 
 function start(): void {
-  const init = window.__HTML_WYSIWYG__;
+  const init = window.__FINESSE__;
   if (!init) {
-    reportError('init data missing (window.__HTML_WYSIWYG__)');
+    reportError('init data missing (window.__FINESSE__)');
     return;
   }
   const session = setupEditSession({

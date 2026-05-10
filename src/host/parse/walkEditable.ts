@@ -163,5 +163,5 @@ export function hasEditAnywayOverride(html: string): boolean {
   const match = /<html(\s[^>]*)?>/i.exec(html);
   if (!match) return false;
   const attrPart = match[1] ?? '';
-  return /\bdata-html-wysiwyg-allow\s*=\s*["']?true["']?/i.test(attrPart);
+  return /\bdata-finesse-allow\s*=\s*["']?true["']?/i.test(attrPart);
 }

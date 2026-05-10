@@ -34,7 +34,7 @@ describe('sanitizeBlockHtml', () => {
 
   it('drops data attrs by default (e.g. host-injected element ids)', () => {
     expect(
-      sanitizeBlockHtml('<strong data-html-wysiwyg-id="42">x</strong>'),
+      sanitizeBlockHtml('<strong data-finesse-id="42">x</strong>'),
     ).toBe('<strong>x</strong>');
   });
 

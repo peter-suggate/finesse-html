@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { AgentCredentialStore } from './agent/credentials';
 import type { ResolvedConfig } from './config';
 import { createPreviewPanel, type PreviewPanel } from './panel';
 import type { PreviewServer } from './server';
@@ -17,11 +18,20 @@ export function registerCommands(
   ctx: CommandsContext,
 ): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('htmlWysiwyg.openPreview', () =>
+    vscode.commands.registerCommand('finesse.openPreview', () =>
       openPreview(context, ctx),
     ),
-    vscode.commands.registerCommand('htmlWysiwyg.closePreview', () => closePreview(ctx)),
-    vscode.commands.registerCommand('htmlWysiwyg.editAnyway', () => editAnyway()),
+    vscode.commands.registerCommand('finesse.closePreview', () => closePreview(ctx)),
+    vscode.commands.registerCommand('finesse.editAnyway', () => editAnyway()),
+    vscode.commands.registerCommand('finesse.connectCursorAgent', () =>
+      connectCursorAgent(context),
+    ),
+    vscode.commands.registerCommand('finesse.disconnectCursorAgent', () =>
+      disconnectCursorAgent(context),
+    ),
+    vscode.commands.registerCommand('finesse.cursorAgentStatus', () =>
+      cursorAgentStatus(context),
+    ),
   );
 }
 
@@ -97,7 +107,7 @@ async function editAnyway(): Promise<void> {
   }
   const doc = editor.document;
   const text = doc.getText();
-  if (/\bdata-html-wysiwyg-allow\s*=\s*["']?true["']?/i.test(text)) {
+  if (/\bdata-finesse-allow\s*=\s*["']?true["']?/i.test(text)) {
     void vscode.window.showInformationMessage('Override already applied.');
     return;
   }
@@ -107,8 +117,30 @@ async function editAnyway(): Promise<void> {
     return;
   }
   const insertPos = match.index + '<html'.length;
-  const insertion = ' data-html-wysiwyg-allow="true"';
+  const insertion = ' data-finesse-allow="true"';
   const edit = new vscode.WorkspaceEdit();
   edit.insert(doc.uri, doc.positionAt(insertPos), insertion);
   await vscode.workspace.applyEdit(edit);
+}
+
+async function connectCursorAgent(context: vscode.ExtensionContext): Promise<void> {
+  const credentials = new AgentCredentialStore(context);
+  await credentials.ensureApiKey('cursor');
+}
+
+async function disconnectCursorAgent(context: vscode.ExtensionContext): Promise<void> {
+  const choice = await vscode.window.showWarningMessage(
+    'Remove the Cursor Agent API key stored by Finesse?',
+    { modal: true },
+    'Disconnect',
+  );
+  if (choice !== 'Disconnect') return;
+  const credentials = new AgentCredentialStore(context);
+  await credentials.clearApiKey('cursor');
+  void vscode.window.showInformationMessage('Cursor Agent is disconnected from Finesse.');
+}
+
+async function cursorAgentStatus(context: vscode.ExtensionContext): Promise<void> {
+  const credentials = new AgentCredentialStore(context);
+  await credentials.showStatus('cursor');
 }

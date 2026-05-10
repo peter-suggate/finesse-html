@@ -60,12 +60,12 @@ describe('computeBlockHtmlSplices — round trip via walkEditable', () => {
     expect(after).not.toContain('<script');
   });
 
-  it('strips data-html-wysiwyg-id attrs that the iframe might re-emit', () => {
+  it('strips data-finesse-id attrs that the iframe might re-emit', () => {
     const src = '<html><body><p>x</p></body></html>';
     const after = commit(
       src,
       0,
-      '<strong data-html-wysiwyg-id="42">bold</strong>',
+      '<strong data-finesse-id="42">bold</strong>',
     );
     expect(after).toBe('<html><body><p><strong>bold</strong></p></body></html>');
   });

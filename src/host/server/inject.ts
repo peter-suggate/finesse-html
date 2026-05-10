@@ -6,7 +6,7 @@ export interface InjectionPayload {
 }
 
 /**
- * Splice `data-html-wysiwyg-id="N"` into each selectable element's opening tag.
+ * Splice `data-finesse-id="N"` into each selectable element's opening tag.
  * The iframe uses these as stable handles that survive implicit DOM insertions
  * (e.g. browser-inserted `<tbody>`) and script mutations.
  *
@@ -33,7 +33,7 @@ export function injectElementIds(html: string, offsetMap: OffsetMap | null): str
     ) {
       continue;
     }
-    inserts.push({ pos: insertPos, text: ` data-html-wysiwyg-id="${el.elementId}"` });
+    inserts.push({ pos: insertPos, text: ` data-finesse-id="${el.elementId}"` });
   }
   if (inserts.length === 0) return html;
   inserts.sort((a, b) => a.pos - b.pos);
@@ -57,7 +57,7 @@ function jsonForScript(value: unknown): string {
 }
 
 export function injectInstrumentation(html: string, payload: InjectionPayload): string {
-  const initScript = `<script>window.__HTML_WYSIWYG__ = ${jsonForScript(payload)};</script>`;
+  const initScript = `<script>window.__FINESSE__ = ${jsonForScript(payload)};</script>`;
   const injected = `\n${initScript}\n${RUNTIME_SCRIPT_TAG}\n`;
   const bodyClose = lastMatchIndex(html, /<\/body\s*>/i);
   if (bodyClose >= 0) {

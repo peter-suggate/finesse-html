@@ -1,12 +1,15 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type {
+  AgentSelectionState,
   DocumentState,
   EditBlockHtml,
   EditBlockTag,
   EditCommit,
   EditCancel,
   EditRemove,
+  ElementSelectionChanged,
+  ElementSelectionSnapshot,
   FileMeta,
   HostMessage,
   IframeMessage,
@@ -14,22 +17,20 @@ import type {
   Ready,
   RuntimeError,
 } from '../shared/protocol';
+import { runSelectedElementAgent } from './agent';
 import {
   applyBlockHtmlCommit,
   applyBlockTagCommit,
   applyEditCommit,
+  applyRecordedSplices,
   applyRemoveCommit,
   type ReplacementEscaper,
 } from './applyEdit';
 import type { ResolvedConfig } from './config';
 import { escapeForJsTemplate } from './jsTemplateEscape';
-import {
-  detectTemplate,
-  hasEditAnywayOverride,
-  walkEditable,
-  walkEditableInJs,
-} from './parse';
+import { detectTemplate, hasEditAnywayOverride, walkEditable, walkEditableInJs } from './parse';
 import { injectElementIds } from './server/inject';
+import { UndoStack, type UndoEntry } from './undoStack';
 
 const JS_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'javascript',
@@ -52,7 +53,7 @@ export interface PreviewPanel {
    * document text; for JS/TS docs it's the concatenated bodies of the tagged
    * template literals discovered by the extractor. `null` if nothing renderable. */
   currentPreviewHtml: string | null;
-  /** For JS/TS docs only: composed HTML with `data-html-wysiwyg-id` attrs
+  /** For JS/TS docs only: composed HTML with `data-finesse-id` attrs
    * already spliced in (since the JS-source-coords offset map can't be used
    * by the server to inject directly into composed bytes). `null` for HTML
    * docs — the server handles injection itself. */
@@ -76,21 +77,18 @@ export interface PanelDeps {
 
 interface WebviewActionMessage {
   type: '__webview_action';
-  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave';
+  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave' | 'undo' | 'redo' | 'askAgent';
   value?: boolean;
 }
 
 type IncomingMessage = IframeMessage | WebviewActionMessage;
 
-export function createPreviewPanel(
-  document: vscode.TextDocument,
-  deps: PanelDeps,
-): PreviewPanel {
+export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDeps): PreviewPanel {
   const relativePath = relativeWebPath(deps.workspaceRoot, document.uri.fsPath);
   const key = document.uri.toString();
   const panel = vscode.window.createWebviewPanel(
-    'htmlWysiwyg.preview',
-    `WYSIWYG: ${path.basename(document.uri.fsPath)}`,
+    'finesse.preview',
+    `Finesse: ${path.basename(document.uri.fsPath)}`,
     vscode.ViewColumn.Beside,
     {
       enableScripts: true,
@@ -106,10 +104,13 @@ export function createPreviewPanel(
   let isTemplated = false;
   let expectedSelfEditVersion: number | null = null;
   let autoSave = false;
+  let currentAgentSelection: ElementSelectionSnapshot | null = null;
+  let agentRunning = false;
   const jsMode = isJsLikeDocument(document);
   const escapeReplacement: ReplacementEscaper | undefined = jsMode
     ? escapeForJsTemplate
     : undefined;
+  const undoStack = new UndoStack();
 
   function reparse(text: string, version: number): void {
     const structuralPatterns = deps.getConfig().templatePatterns;
@@ -119,10 +120,7 @@ export function createPreviewPanel(
       });
       currentOffsetMap = result.offsetMap;
       currentPreviewHtml = result.composedHtml;
-      currentInjectedPreviewHtml = injectElementIds(
-        result.composedHtml,
-        result.composedOffsetMap,
-      );
+      currentInjectedPreviewHtml = injectElementIds(result.composedHtml, result.composedOffsetMap);
       isTemplated = false;
       currentVersion = version;
       return;
@@ -161,6 +159,18 @@ export function createPreviewPanel(
       type: 'documentState',
       isDirty: document.isDirty,
       autoSave,
+      canUndo: undoStack.canUndo(),
+      canRedo: undoStack.canRedo(),
+    };
+    panel.webview.postMessage(msg);
+  }
+
+  function postAgentSelectionState(): void {
+    const msg: AgentSelectionState = {
+      type: 'agentSelectionState',
+      selected: currentAgentSelection !== null,
+      label: currentAgentSelection ? selectionLabel(currentAgentSelection) : undefined,
+      agentRunning,
     };
     panel.webview.postMessage(msg);
   }
@@ -171,7 +181,7 @@ export function createPreviewPanel(
       await document.save();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      void vscode.window.showErrorMessage(`HTML WYSIWYG save failed: ${message}`);
+      void vscode.window.showErrorMessage(`Finesse save failed: ${message}`);
     }
   }
 
@@ -196,7 +206,7 @@ export function createPreviewPanel(
         await vscode.commands.executeCommand('workbench.action.files.revert');
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        void vscode.window.showErrorMessage(`HTML WYSIWYG discard failed: ${message}`);
+        void vscode.window.showErrorMessage(`Finesse discard failed: ${message}`);
       }
     }
   }
@@ -211,7 +221,7 @@ export function createPreviewPanel(
     switch (msg.type) {
       case '__webview_action':
         if (msg.action === 'editAnyway') {
-          await vscode.commands.executeCommand('htmlWysiwyg.editAnyway');
+          await vscode.commands.executeCommand('finesse.editAnyway');
         } else if (msg.action === 'save') {
           await saveDocument();
         } else if (msg.action === 'discard') {
@@ -220,6 +230,12 @@ export function createPreviewPanel(
           autoSave = !!msg.value;
           postDocumentState();
           if (autoSave) await saveDocument();
+        } else if (msg.action === 'undo') {
+          await handleUndoRequest();
+        } else if (msg.action === 'redo') {
+          await handleRedoRequest();
+        } else if (msg.action === 'askAgent') {
+          await handleAskAgentRequest();
         }
         return;
       case 'ready':
@@ -243,6 +259,15 @@ export function createPreviewPanel(
       case 'saveRequest':
         await saveDocument();
         return;
+      case 'undoRequest':
+        await handleUndoRequest();
+        return;
+      case 'redoRequest':
+        await handleRedoRequest();
+        return;
+      case 'elementSelectionChanged':
+        handleElementSelectionChanged(msg);
+        return;
       case 'runtimeError':
         handleRuntimeError(msg);
         return;
@@ -257,6 +282,12 @@ export function createPreviewPanel(
       isTemplated,
     } satisfies FileMeta);
     postDocumentState();
+    postAgentSelectionState();
+  }
+
+  function recordIfNonEmpty(entry: UndoEntry): void {
+    if (entry.forward.length === 0) return;
+    undoStack.push(entry);
   }
 
   async function handleEditCommit(msg: EditCommit): Promise<void> {
@@ -278,13 +309,15 @@ export function createPreviewPanel(
           expectedVersion: result.expected,
           actualVersion: result.actual,
         });
-      } else if (autoSave) {
-        await saveDocument();
+      } else {
+        recordIfNonEmpty(result.undoEntry);
+        postDocumentState();
+        if (autoSave) await saveDocument();
       }
     } catch (err) {
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
-      void vscode.window.showErrorMessage(`HTML WYSIWYG edit failed: ${message}`);
+      void vscode.window.showErrorMessage(`Finesse edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }
@@ -307,13 +340,15 @@ export function createPreviewPanel(
           expectedVersion: result.expected,
           actualVersion: result.actual,
         });
-      } else if (autoSave) {
-        await saveDocument();
+      } else {
+        recordIfNonEmpty(result.undoEntry);
+        postDocumentState();
+        if (autoSave) await saveDocument();
       }
     } catch (err) {
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
-      void vscode.window.showErrorMessage(`HTML WYSIWYG remove failed: ${message}`);
+      void vscode.window.showErrorMessage(`Finesse remove failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }
@@ -337,13 +372,15 @@ export function createPreviewPanel(
           expectedVersion: result.expected,
           actualVersion: result.actual,
         });
-      } else if (autoSave) {
-        await saveDocument();
+      } else {
+        recordIfNonEmpty(result.undoEntry);
+        postDocumentState();
+        if (autoSave) await saveDocument();
       }
     } catch (err) {
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
-      void vscode.window.showErrorMessage(`HTML WYSIWYG block edit failed: ${message}`);
+      void vscode.window.showErrorMessage(`Finesse block edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }
@@ -366,14 +403,141 @@ export function createPreviewPanel(
           expectedVersion: result.expected,
           actualVersion: result.actual,
         });
-      } else if (autoSave) {
-        await saveDocument();
+      } else {
+        recordIfNonEmpty(result.undoEntry);
+        postDocumentState();
+        if (autoSave) await saveDocument();
       }
     } catch (err) {
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
-      void vscode.window.showErrorMessage(`HTML WYSIWYG tag transform failed: ${message}`);
+      void vscode.window.showErrorMessage(`Finesse tag transform failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  async function handleUndoRequest(): Promise<void> {
+    const entry = undoStack.popUndo();
+    if (!entry) return;
+    try {
+      const result = await applyRecordedSplices(
+        document,
+        entry.inverse,
+        currentVersion,
+        (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+      );
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        undoStack.clear();
+        panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+        return;
+      }
+      undoStack.pushRedo(entry);
+      postDocumentState();
+      if (autoSave) await saveDocument();
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      undoStack.clear();
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`Finesse undo failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  async function handleRedoRequest(): Promise<void> {
+    const entry = undoStack.popRedo();
+    if (!entry) return;
+    try {
+      const result = await applyRecordedSplices(
+        document,
+        entry.forward,
+        currentVersion,
+        (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+      );
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        undoStack.clear();
+        panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+        return;
+      }
+      undoStack.pushUndo(entry);
+      postDocumentState();
+      if (autoSave) await saveDocument();
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      undoStack.clear();
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`Finesse redo failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  function handleElementSelectionChanged(msg: ElementSelectionChanged): void {
+    currentAgentSelection = msg.selection;
+    postAgentSelectionState();
+  }
+
+  async function handleAskAgentRequest(): Promise<void> {
+    if (agentRunning) return;
+    if (!currentAgentSelection || !currentOffsetMap) {
+      void vscode.window.showInformationMessage('Select an element in the preview first.');
+      return;
+    }
+    if (
+      currentAgentSelection.documentVersion !== currentVersion ||
+      currentAgentSelection.documentVersion !== document.version
+    ) {
+      currentAgentSelection = null;
+      postAgentSelectionState();
+      void vscode.window.showWarningMessage('That selection is stale. Select the element again.');
+      return;
+    }
+
+    const userPrompt = await vscode.window.showInputBox({
+      title: 'Ask Agent to change selected element',
+      prompt: `Selected ${selectionLabel(currentAgentSelection)} in ${relativePath}`,
+      placeHolder: 'Make this button more prominent',
+      ignoreFocusOut: true,
+    });
+    if (!userPrompt || !userPrompt.trim()) return;
+
+    const approved = await vscode.window.showWarningMessage(
+      `Run Cursor Agent on ${selectionLabel(currentAgentSelection)}? This may use Cursor agent credits.`,
+      { modal: true },
+      'Run Agent',
+    );
+    if (approved !== 'Run Agent') return;
+
+    agentRunning = true;
+    postAgentSelectionState();
+    try {
+      await runSelectedElementAgent({
+        providerId: 'cursor',
+        context: deps.context,
+        workspaceRoot: deps.workspaceRoot,
+        model: deps.getConfig().agentCursorModel,
+        document,
+        relativePath,
+        offsetMap: currentOffsetMap,
+        selection: currentAgentSelection,
+        userPrompt: userPrompt.trim(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const action = await vscode.window.showErrorMessage(
+        `Finesse agent failed: ${humanizeAgentError(message)}`,
+        'Connect Cursor Agent',
+      );
+      if (action === 'Connect Cursor Agent') {
+        await vscode.commands.executeCommand('finesse.connectCursorAgent');
+      }
+    } finally {
+      agentRunning = false;
+      postAgentSelectionState();
     }
   }
 
@@ -382,7 +546,7 @@ export function createPreviewPanel(
   }
 
   function handleRuntimeError(msg: RuntimeError): void {
-    console.warn('[htmlWysiwyg] iframe runtime error:', msg.message, msg.stack);
+    console.warn('[finesse] iframe runtime error:', msg.message, msg.stack);
   }
 
   return {
@@ -447,16 +611,37 @@ export function createPreviewPanel(
         }
         panel.webview.postMessage(fm);
       } else {
+        // External edit invalidates the recorded splice offsets — wipe both
+        // branches so a stale undo can't corrupt the doc.
+        undoStack.clear();
+        currentAgentSelection = null;
         if (currentOffsetMap) panel.webview.postMessage(currentOffsetMap);
         panel.webview.postMessage(fm);
         panel.webview.postMessage({ type: 'reload', reason: 'external-edit' });
       }
       postDocumentState();
+      postAgentSelectionState();
     },
     onDocumentSaved(_doc) {
       postDocumentState();
     },
   };
+}
+
+function selectionLabel(selection: ElementSelectionSnapshot): string {
+  const text = selection.textPreview ? ` "${selection.textPreview.slice(0, 40)}"` : '';
+  return `<${selection.tagName}>${text}`;
+}
+
+function humanizeAgentError(message: string): string {
+  if (
+    message.includes('CURSOR_API_KEY') ||
+    message.toLowerCase().includes('api key') ||
+    message.toLowerCase().includes('not configured')
+  ) {
+    return 'Cursor Agent is not connected. Choose "Connect Cursor Agent", open the Cursor Dashboard, create a key in Integrations > User API Keys, then paste it into Finesse.';
+  }
+  return message;
 }
 
 interface PanelInit {
@@ -465,11 +650,7 @@ interface PanelInit {
   port: number;
 }
 
-function buildWebviewHtml(
-  webview: vscode.Webview,
-  extensionPath: string,
-  init: PanelInit,
-): string {
+function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: PanelInit): string {
   const mainJs = webview
     .asWebviewUri(vscode.Uri.file(path.join(extensionPath, 'dist', 'webview', 'main.js')))
     .toString();
@@ -488,13 +669,14 @@ function buildWebviewHtml(
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy" content="${csp}" />
-    <title>HTML WYSIWYG</title>
+    <title>Finesse</title>
     <style>
       :root { color-scheme: dark light; }
       body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); height: 100vh; display: flex; flex-direction: column; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); }
       #status { display: flex; gap: 12px; align-items: center; padding: 4px 12px; font-size: 11px; background: var(--vscode-statusBar-background); color: var(--vscode-statusBar-foreground); border-bottom: 1px solid var(--vscode-panel-border); }
       #status .muted { opacity: 0.7; }
       #status .grow { flex: 1; }
+      #status .selection { max-width: 220px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
       #status .dirty-dot { color: #e2a04a; font-size: 13px; line-height: 1; opacity: 0; transition: opacity 100ms ease-out; }
       #status .dirty-dot.is-dirty { opacity: 1; }
       #status button.tool { font: inherit; font-size: 11px; background: transparent; color: inherit; border: 1px solid var(--vscode-panel-border); border-radius: 2px; padding: 1px 8px; cursor: pointer; opacity: 0.85; }
@@ -513,7 +695,7 @@ function buildWebviewHtml(
       #frame-wrap { flex: 1; position: relative; }
       #frame { width: 100%; height: 100%; border: none; background: white; }
     </style>
-    <script>window.__HTML_WYSIWYG_INIT__ = ${initJson};</script>
+    <script>window.__FINESSE_INIT__ = ${initJson};</script>
   </head>
   <body>
     <div id="status" role="status">
@@ -522,15 +704,19 @@ function buildWebviewHtml(
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
       <span id="status-locked" class="muted" hidden>editing locked</span>
+      <span id="status-selection" class="muted selection" hidden>no selection</span>
       <span class="grow"></span>
       <label class="toggle" title="Save automatically after each edit">
         <input id="status-autosave" type="checkbox" />
         <span>Auto-save</span>
       </label>
       <button id="status-discard" class="tool" type="button" title="Discard unsaved changes" disabled>Discard</button>
+      <button id="status-undo" class="tool" type="button" title="Undo Finesse edit (⌘Z)" disabled>Undo</button>
+      <button id="status-redo" class="tool" type="button" title="Redo Finesse edit (⇧⌘Z)" disabled>Redo</button>
+      <button id="status-ask-agent" class="tool" type="button" title="Ask an agent to change the selected element" disabled>Ask Agent</button>
       <button id="status-save" class="tool" type="button" title="Save (⌘S)" disabled>Save</button>
     </div>
-    <div id="banners" role="region" aria-label="HTML WYSIWYG notifications" aria-live="polite"></div>
+    <div id="banners" role="region" aria-label="Finesse notifications" aria-live="polite"></div>
     <div id="frame-wrap">
       <iframe id="frame" title="HTML preview" aria-label="HTML preview" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
     </div>

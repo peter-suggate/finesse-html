@@ -1,4 +1,4 @@
-# vscode-html-wysiwyg
+# Finesse
 
 Click any block-level element in an HTML file. Edit the text. Source updates with byte-perfect preservation of everything you didn't touch.
 
@@ -16,10 +16,10 @@ The packaged `.vsix` is built locally; install it into Cursor or VS Code:
 
 ```bash
 # Cursor
-cursor --install-extension /Users/petersuggate/code/anjuna/vscode-html-wysiwyg/vscode-html-wysiwyg.vsix
+cursor --install-extension /Users/petersuggate/code/anjuna/finesse-html/finesse-html.vsix
 
 # VS Code
-code --install-extension /Users/petersuggate/code/anjuna/vscode-html-wysiwyg/vscode-html-wysiwyg.vsix
+code --install-extension /Users/petersuggate/code/anjuna/finesse-html/finesse-html.vsix
 ```
 
 Or via the UI: Extensions panel → `⋯` (More Actions) → **Install from VSIX…** → choose the file. Reload the window.
@@ -28,7 +28,7 @@ Or via the UI: Extensions panel → `⋯` (More Actions) → **Install from VSIX
 
 1. Open a workspace folder.
 2. Open an HTML file in an editor pane.
-3. `Cmd+Shift+P` → **HTML WYSIWYG: Open Preview**. The preview opens beside.
+3. `Cmd+Shift+P` → **Finesse: Open Preview**. The preview opens beside.
 4. Hover an element — blue outline.
 5. Click — solid outline, block becomes editable, cursor lands at the end.
 6. Type. Then:
@@ -49,11 +49,11 @@ You can also tab between editable blocks (`Tab` / `Shift+Tab`) and press `Enter`
 - **Attributes** (`href`, `src`, `alt`, `class`, `title`). → planned for v0.2 (Phase 3B).
 - **Structure** — adding/removing/reordering elements, inserting new paragraphs. Press `Enter` while editing commits the edit; it does *not* insert a new paragraph.
 - **`<pre>` and `<code>` content** — locked. Whitespace edits in those would be too easy to get wrong; v2 may add a code-mode editor.
-- **Templated files** — anything containing `{{…}}`, `<%…%>`, `${…}`, `<?…?>`, or `{%…%}` shows a preview-only banner. Click **Edit anyway** in the banner to inject `data-html-wysiwyg-allow="true"` on `<html>` and unlock; template-bearing text nodes stay individually locked.
+- **Templated files** — anything containing `{{…}}`, `<%…%>`, `${…}`, `<?…?>`, or `{%…%}` shows a preview-only banner. Click **Edit anyway** in the banner to inject `data-finesse-allow="true"` on `<html>` and unlock; template-bearing text nodes stay individually locked.
 
 ## Per-element opt-out
 
-Add `data-no-edit` to any element (or `contenteditable="false"`) and the WYSIWYG layer ignores it.
+Add `data-no-edit` to any element (or `contenteditable="false"`) and Finesse ignores it.
 
 ```html
 <p data-no-edit>This paragraph is read-only in the preview.</p>
@@ -65,13 +65,13 @@ Add `data-no-edit` to any element (or `contenteditable="false"`) and the WYSIWYG
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `htmlWysiwyg.port` | `"auto"` | Preview HTTP server port. `"auto"` allocates ephemeral. Pin a number if you want a stable URL. |
-| `htmlWysiwyg.templateTokens` | five default regexes | Patterns that mark a file as templated. Override to extend or restrict. |
-| `htmlWysiwyg.serverIdleTimeout` | `60000` ms | Time after the last preview closes before the HTTP server shuts down. |
-| `htmlWysiwyg.reloadDebounceMs` | `150` ms | Debounce window for external-file-change reloads. |
-| `htmlWysiwyg.openOnHtmlOpen` | `false` | Auto-open the preview whenever an HTML file opens. |
-| `htmlWysiwyg.editableElements` | `[]` | Reserved for v2: override the block-container tag list. |
-| `htmlWysiwyg.aiCommand` | `""` | Reserved for v2 (Phase 3A): command id to invoke for "Rewrite with AI". |
+| `finesse.port` | `"auto"` | Preview HTTP server port. `"auto"` allocates ephemeral. Pin a number if you want a stable URL. |
+| `finesse.templateTokens` | five default regexes | Patterns that mark a file as templated. Override to extend or restrict. |
+| `finesse.serverIdleTimeout` | `60000` ms | Time after the last preview closes before the HTTP server shuts down. |
+| `finesse.reloadDebounceMs` | `150` ms | Debounce window for external-file-change reloads. |
+| `finesse.openOnHtmlOpen` | `false` | Auto-open the preview whenever an HTML file opens. |
+| `finesse.editableElements` | `[]` | Reserved for v2: override the block-container tag list. |
+| `finesse.aiCommand` | `""` | Reserved for v2 (Phase 3A): command id to invoke for "Rewrite with AI". |
 
 ---
 
@@ -107,17 +107,17 @@ Full design: [SPEC.md](./SPEC.md).
 
 ```bash
 git clone <this repo>
-cd vscode-html-wysiwyg
+cd finesse-html
 npm install
 npm run build      # produces dist/{host,iframe,webview}/*
 npm run typecheck  # tsc across host, iframe, webview targets
 npm run lint
-npm run package    # builds vscode-html-wysiwyg.vsix
+npm run package    # builds finesse-html.vsix
 ```
 
 ### Run the Extension Development Host
 
-Open the repo in VS Code or Cursor and press **F5**. A second window opens with `fixtures/` loaded as the workspace, the extension under development running. Pick a fixture, run **HTML WYSIWYG: Open Preview**, edit.
+Open the repo in VS Code or Cursor and press **F5**. A second window opens with `fixtures/` loaded as the workspace, the extension under development running. Pick a fixture, run **Finesse: Open Preview**, edit.
 
 ### Headless smoke test
 

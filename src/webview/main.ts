@@ -16,7 +16,7 @@ interface InitData {
 
 declare global {
   interface Window {
-    __HTML_WYSIWYG_INIT__?: InitData;
+    __FINESSE_INIT__?: InitData;
   }
 }
 
@@ -29,18 +29,18 @@ declare const acquireVsCodeApi: () => VsCodeApi;
 
 interface WebviewActionMessage {
   type: '__webview_action';
-  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave';
+  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave' | 'undo' | 'redo' | 'askAgent';
   value?: boolean;
 }
 
 const vscode = acquireVsCodeApi();
-const init = window.__HTML_WYSIWYG_INIT__;
+const init = window.__FINESSE_INIT__;
 
 const banners = document.getElementById('banners');
 if (banners) initBanners(banners);
 
 if (!init) {
-  showRuntimeErrorBanner('init data missing (window.__HTML_WYSIWYG_INIT__)');
+  showRuntimeErrorBanner('init data missing (window.__FINESSE_INIT__)');
 } else {
   initStatus(
     {
@@ -50,11 +50,18 @@ if (!init) {
       locked: init.fileMeta.isTemplated,
       isDirty: false,
       autoSave: false,
+      canUndo: false,
+      canRedo: false,
+      selectedLabel: undefined,
+      agentRunning: false,
     },
     {
       onSave: requestSave,
       onDiscard: requestDiscard,
       onToggleAutoSave: (next) => requestSetAutoSave(next),
+      onUndo: requestUndo,
+      onRedo: requestRedo,
+      onAskAgent: requestAskAgent,
     },
   );
   if (init.fileMeta.isTemplated) {
@@ -80,6 +87,21 @@ function requestDiscard(): void {
 
 function requestSetAutoSave(value: boolean): void {
   const msg: WebviewActionMessage = { type: '__webview_action', action: 'setAutoSave', value };
+  vscode.postMessage(msg);
+}
+
+function requestUndo(): void {
+  const msg: WebviewActionMessage = { type: '__webview_action', action: 'undo' };
+  vscode.postMessage(msg);
+}
+
+function requestRedo(): void {
+  const msg: WebviewActionMessage = { type: '__webview_action', action: 'redo' };
+  vscode.postMessage(msg);
+}
+
+function requestAskAgent(): void {
+  const msg: WebviewActionMessage = { type: '__webview_action', action: 'askAgent' };
   vscode.postMessage(msg);
 }
 
@@ -147,7 +169,18 @@ function bootIframe(init: InitData): void {
         relayToIframe(data);
         break;
       case 'documentState':
-        updateStatus({ isDirty: data.isDirty, autoSave: data.autoSave });
+        updateStatus({
+          isDirty: data.isDirty,
+          autoSave: data.autoSave,
+          canUndo: data.canUndo,
+          canRedo: data.canRedo,
+        });
+        break;
+      case 'agentSelectionState':
+        updateStatus({
+          selectedLabel: data.selected ? data.label : undefined,
+          agentRunning: data.agentRunning,
+        });
         break;
     }
   }
@@ -159,6 +192,17 @@ window.addEventListener(
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
       requestSave();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) requestRedo();
+      else requestUndo();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      requestRedo();
     }
   },
   true,
@@ -170,10 +214,15 @@ function isIframeMessage(data: unknown): data is IframeMessage {
   return (
     t === 'editCommit' ||
     t === 'editRemove' ||
+    t === 'editBlockHtml' ||
+    t === 'editBlockTag' ||
     t === 'editCancel' ||
     t === 'runtimeError' ||
     t === 'ready' ||
-    t === 'saveRequest'
+    t === 'saveRequest' ||
+    t === 'undoRequest' ||
+    t === 'redoRequest' ||
+    t === 'elementSelectionChanged'
   );
 }
 
@@ -186,6 +235,7 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'reload' ||
     t === 'staleCommit' ||
     t === 'fileMeta' ||
-    t === 'documentState'
+    t === 'documentState' ||
+    t === 'agentSelectionState'
   );
 }

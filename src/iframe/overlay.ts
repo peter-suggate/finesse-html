@@ -49,8 +49,8 @@ const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
 
 export function setupOverlay(opts: OverlayOpts): void {
   const { session } = opts;
-  const hover = createOverlay(HOVER_STYLE, 'html-wysiwyg-hover');
-  const selection = createOverlay(SELECTION_STYLE, 'html-wysiwyg-selection');
+  const hover = createOverlay(HOVER_STYLE, 'finesse-hover');
+  const selection = createOverlay(SELECTION_STYLE, 'finesse-selection');
   const deleteBtn = createDeleteButton();
   document.body.appendChild(hover);
   document.body.appendChild(selection);
@@ -167,6 +167,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     if (!target) return;
     setHoveredEl(null);
     setFocusedEl(null);
+    session.announceElementSelection(null);
     hover.style.display = 'none';
     showSelection(null);
     session.removeElement(target);
@@ -193,6 +194,7 @@ export function setupOverlay(opts: OverlayOpts): void {
       hover.style.display = 'none';
       setHoveredEl(null);
       session.selectElement(exact);
+      session.announceElementSelection(exact);
       return;
     }
     // Default click: prefer text-edit on an editable block, else select for delete.
@@ -205,6 +207,7 @@ export function setupOverlay(opts: OverlayOpts): void {
         hover.style.display = 'none';
         setHoveredEl(null);
         setFocusedEl(null);
+        session.announceElementSelection(block);
       }
       return;
     }
@@ -215,6 +218,7 @@ export function setupOverlay(opts: OverlayOpts): void {
       hover.style.display = 'none';
       setHoveredEl(null);
       session.selectElement(selectable);
+      session.announceElementSelection(selectable);
     }
   });
 
@@ -227,6 +231,34 @@ export function setupOverlay(opts: OverlayOpts): void {
         showSelection(null);
       }
       session.requestSave();
+      return;
+    }
+    // Cmd/Ctrl+Z: undo the most recent committed Finesse edit. While an edit
+    // session is active, defer to the browser's native contenteditable undo
+    // so within-edit typing can be undone normally.
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !session.hasActiveBlock() &&
+      !session.isLocked() &&
+      (e.key === 'z' || e.key === 'Z')
+    ) {
+      e.preventDefault();
+      if (e.shiftKey) session.requestRedo();
+      else session.requestUndo();
+      return;
+    }
+    // Cmd/Ctrl+Y: redo (Windows-style alternative to Cmd+Shift+Z).
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !session.hasActiveBlock() &&
+      !session.isLocked() &&
+      (e.key === 'y' || e.key === 'Y')
+    ) {
+      e.preventDefault();
+      session.requestRedo();
       return;
     }
     if (session.hasActiveBlock()) {
@@ -258,6 +290,7 @@ export function setupOverlay(opts: OverlayOpts): void {
           hover.style.display = 'none';
           setHoveredEl(null);
           setFocusedEl(null);
+          session.announceElementSelection(block);
         }
       }
       return;
@@ -272,6 +305,7 @@ export function setupOverlay(opts: OverlayOpts): void {
       e.preventDefault();
       setHoveredEl(null);
       setFocusedEl(null);
+      session.announceElementSelection(null);
       hover.style.display = 'none';
       showSelection(null);
       session.removeElement(focused);
@@ -286,6 +320,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     showSelection(target);
     hover.style.display = 'none';
     setFocusedEl(target);
+    session.announceElementSelection(target);
   });
 
   document.addEventListener('focusout', () => {
@@ -333,12 +368,12 @@ export function setupOverlay(opts: OverlayOpts): void {
 /**
  * Click/move events that originate inside our own UI (toolbar, link popover,
  * delete button, etc.) should never be treated as canvas interactions.
- * Detected by id prefix `html-wysiwyg-` so new UI pieces are auto-excluded.
+ * Detected by id prefix `finesse-` so new UI pieces are auto-excluded.
  */
 function isInOverlayUi(target: Element): boolean {
   let cur: Element | null = target;
   while (cur && cur !== document.body) {
-    if (cur instanceof HTMLElement && cur.id && cur.id.startsWith('html-wysiwyg-')) return true;
+    if (cur instanceof HTMLElement && cur.id && cur.id.startsWith('finesse-')) return true;
     cur = cur.parentElement;
   }
   return false;
@@ -346,7 +381,7 @@ function isInOverlayUi(target: Element): boolean {
 
 function createDeleteButton(): HTMLButtonElement {
   const btn = document.createElement('button');
-  btn.id = 'html-wysiwyg-delete';
+  btn.id = 'finesse-delete';
   btn.type = 'button';
   btn.textContent = '×';
   btn.title = 'Remove element (Delete)';

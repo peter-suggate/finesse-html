@@ -1,4 +1,4 @@
-// A small lit-html-style template literal fixture for the WYSIWYG preview.
+// A small lit-html-style template literal fixture for the Finesse preview.
 // The host extracts the html`...` body, renders it as the iframe preview,
 // and applies edits back into this source file with byte-perfect fidelity
 // outside the edited text spans.

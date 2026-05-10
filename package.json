@@ -1,7 +1,7 @@
 {
-  "name": "vscode-html-wysiwyg",
-  "displayName": "HTML WYSIWYG",
-  "description": "Click-to-edit WYSIWYG preview for static HTML files with byte-perfect source preservation.",
+  "name": "finesse-html",
+  "displayName": "Finesse",
+  "description": "Edit rendered HTML on the fly while preserving your source.",
   "version": "0.0.1",
   "publisher": "peter-suggate",
   "license": "MIT",
@@ -14,7 +14,7 @@
   "main": "dist/host/extension.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/peter-suggate/vscode-html-wysiwyg.git"
+    "url": "https://github.com/peter-suggate/finesse-html.git"
   },
   "activationEvents": [
     "onLanguage:html",
@@ -22,27 +22,42 @@
     "onLanguage:typescript",
     "onLanguage:javascriptreact",
     "onLanguage:typescriptreact",
-    "onCommand:htmlWysiwyg.openPreview"
+    "onCommand:finesse.openPreview",
+    "onCommand:finesse.connectCursorAgent",
+    "onCommand:finesse.disconnectCursorAgent",
+    "onCommand:finesse.cursorAgentStatus"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "htmlWysiwyg.openPreview",
-        "title": "HTML WYSIWYG: Open Preview"
+        "command": "finesse.openPreview",
+        "title": "Finesse: Open Preview"
       },
       {
-        "command": "htmlWysiwyg.closePreview",
-        "title": "HTML WYSIWYG: Close Preview"
+        "command": "finesse.closePreview",
+        "title": "Finesse: Close Preview"
       },
       {
-        "command": "htmlWysiwyg.editAnyway",
-        "title": "HTML WYSIWYG: Edit Templated File Anyway"
+        "command": "finesse.editAnyway",
+        "title": "Finesse: Edit Templated File Anyway"
+      },
+      {
+        "command": "finesse.connectCursorAgent",
+        "title": "Finesse: Connect Cursor Agent"
+      },
+      {
+        "command": "finesse.disconnectCursorAgent",
+        "title": "Finesse: Disconnect Cursor Agent"
+      },
+      {
+        "command": "finesse.cursorAgentStatus",
+        "title": "Finesse: Show Cursor Agent Connection Status"
       }
     ],
     "configuration": {
-      "title": "HTML WYSIWYG",
+      "title": "Finesse",
       "properties": {
-        "htmlWysiwyg.port": {
+        "finesse.port": {
           "type": [
             "number",
             "string"
@@ -50,7 +65,7 @@
           "default": "auto",
           "markdownDescription": "HTTP server port. Use `\"auto\"` to allocate an ephemeral port, or a specific port number."
         },
-        "htmlWysiwyg.editableElements": {
+        "finesse.editableElements": {
           "type": "array",
           "items": {
             "type": "string"
@@ -58,7 +73,7 @@
           "default": [],
           "description": "Override block-container selector list. Empty = use computed defaults."
         },
-        "htmlWysiwyg.templateTokens": {
+        "finesse.templateTokens": {
           "type": "array",
           "items": {
             "type": "string"
@@ -71,25 +86,30 @@
           ],
           "description": "Regex source patterns marking the whole file as templated. JS template-literal `${...}` interpolations are always handled at the per-text-node level and don't lock the file."
         },
-        "htmlWysiwyg.serverIdleTimeout": {
+        "finesse.serverIdleTimeout": {
           "type": "number",
           "default": 60000,
           "description": "Milliseconds to keep the preview server alive after the last preview closes."
         },
-        "htmlWysiwyg.reloadDebounceMs": {
+        "finesse.reloadDebounceMs": {
           "type": "number",
           "default": 150,
           "description": "Debounce window (ms) for external-edit reload triggers."
         },
-        "htmlWysiwyg.openOnHtmlOpen": {
+        "finesse.openOnHtmlOpen": {
           "type": "boolean",
           "default": false,
           "description": "Automatically open the preview when an HTML file is opened."
         },
-        "htmlWysiwyg.aiCommand": {
+        "finesse.aiCommand": {
           "type": "string",
           "default": "",
           "description": "Command id to invoke for \"Rewrite with AI\" (Phase 3A). Empty = auto-detect at activation."
+        },
+        "finesse.agent.cursorModel": {
+          "type": "string",
+          "default": "composer-2",
+          "description": "Cursor model id to use when asking an agent to change the selected element."
         }
       }
     }
@@ -100,16 +120,19 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.iframe.json --noEmit && tsc -p tsconfig.webview.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "vitest run",
+    "test:e2e": "npm run build && playwright test",
     "test:watch": "vitest",
-    "package": "vsce package --no-dependencies --out vscode-html-wysiwyg.vsix",
+    "package": "vsce package --out finesse-html.vsix",
     "clean": "rimraf dist *.vsix"
   },
   "dependencies": {
+    "@cursor/sdk": "^1.0.12",
     "parse5": "^7.1.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@playwright/test": "^1.59.1",
     "@types/node": "^20.12.7",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",

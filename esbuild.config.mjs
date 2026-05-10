@@ -17,7 +17,7 @@ const configs = [
     outfile: 'dist/host/extension.js',
     platform: 'node',
     format: 'cjs',
-    external: ['vscode'],
+    external: ['vscode', '@cursor/sdk'],
   },
   {
     ...common,

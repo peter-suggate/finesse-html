@@ -6,7 +6,7 @@
  * the controller layer wires those.
  */
 
-export const TOOLBAR_ID = 'html-wysiwyg-toolbar';
+export const TOOLBAR_ID = 'finesse-toolbar';
 
 export type ButtonKind = 'toggle' | 'action' | 'separator' | 'select';
 
@@ -37,7 +37,7 @@ export interface ToolbarHandle {
 }
 
 const CSS = `
-.html-wysiwyg-toolbar-root {
+.finesse-toolbar-root {
   position: fixed;
   z-index: 2147483645;
   display: none;
@@ -60,17 +60,17 @@ const CSS = `
   transition: opacity 120ms ease-out, transform 120ms ease-out;
   -webkit-font-smoothing: antialiased;
 }
-.html-wysiwyg-toolbar-root[data-visible="true"] {
+.finesse-toolbar-root[data-visible="true"] {
   opacity: 1;
   transform: translateY(0);
 }
-.html-wysiwyg-toolbar-root[data-placement="below"] {
+.finesse-toolbar-root[data-placement="below"] {
   transform: translateY(-4px);
 }
-.html-wysiwyg-toolbar-root[data-placement="below"][data-visible="true"] {
+.finesse-toolbar-root[data-placement="below"][data-visible="true"] {
   transform: translateY(0);
 }
-.html-wysiwyg-toolbar-btn {
+.finesse-toolbar-btn {
   appearance: none;
   background: transparent;
   border: none;
@@ -86,35 +86,35 @@ const CSS = `
   cursor: pointer;
   transition: background 80ms ease-out, color 80ms ease-out;
 }
-.html-wysiwyg-toolbar-btn:hover {
+.finesse-toolbar-btn:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
 }
-.html-wysiwyg-toolbar-btn[aria-pressed="true"] {
+.finesse-toolbar-btn[aria-pressed="true"] {
   background: rgba(74, 144, 226, 0.22);
   color: #6cb0ff;
 }
-.html-wysiwyg-toolbar-btn[aria-pressed="true"]:hover {
+.finesse-toolbar-btn[aria-pressed="true"]:hover {
   background: rgba(74, 144, 226, 0.32);
   color: #8fc4ff;
 }
-.html-wysiwyg-toolbar-btn:focus-visible {
+.finesse-toolbar-btn:focus-visible {
   outline: 2px solid #6cb0ff;
   outline-offset: 1px;
 }
-.html-wysiwyg-toolbar-btn svg {
+.finesse-toolbar-btn svg {
   width: 16px;
   height: 16px;
   display: block;
   pointer-events: none;
 }
-.html-wysiwyg-toolbar-sep {
+.finesse-toolbar-sep {
   width: 1px;
   height: 18px;
   background: rgba(255, 255, 255, 0.12);
   margin: 0 3px;
 }
-.html-wysiwyg-toolbar-select {
+.finesse-toolbar-select {
   appearance: none;
   -webkit-appearance: none;
   background: transparent;
@@ -130,20 +130,20 @@ const CSS = `
   background-repeat: no-repeat;
   background-position: right 6px center;
 }
-.html-wysiwyg-toolbar-select:hover {
+.finesse-toolbar-select:hover {
   background-color: rgba(255, 255, 255, 0.08);
   color: #ffffff;
 }
-.html-wysiwyg-toolbar-select:focus-visible {
+.finesse-toolbar-select:focus-visible {
   outline: 2px solid #6cb0ff;
   outline-offset: 1px;
 }
-.html-wysiwyg-toolbar-select option {
+.finesse-toolbar-select option {
   background: #1c1c1e;
   color: #f5f5f7;
 }
 @media (prefers-color-scheme: light) {
-  .html-wysiwyg-toolbar-root {
+  .finesse-toolbar-root {
     background: rgba(255, 255, 255, 0.98);
     color: #1c1c1e;
     border-color: rgba(0, 0, 0, 0.08);
@@ -151,20 +151,20 @@ const CSS = `
       0 6px 24px rgba(0, 0, 0, 0.12),
       0 1px 2px rgba(0, 0, 0, 0.06);
   }
-  .html-wysiwyg-toolbar-btn { color: #4a4a4f; }
-  .html-wysiwyg-toolbar-btn:hover { background: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
-  .html-wysiwyg-toolbar-btn[aria-pressed="true"] {
+  .finesse-toolbar-btn { color: #4a4a4f; }
+  .finesse-toolbar-btn:hover { background: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
+  .finesse-toolbar-btn[aria-pressed="true"] {
     background: rgba(30, 111, 217, 0.14);
     color: #1e6fd9;
   }
-  .html-wysiwyg-toolbar-btn[aria-pressed="true"]:hover {
+  .finesse-toolbar-btn[aria-pressed="true"]:hover {
     background: rgba(30, 111, 217, 0.22);
   }
-  .html-wysiwyg-toolbar-sep { background: rgba(0, 0, 0, 0.10); }
-  .html-wysiwyg-toolbar-select { color: #4a4a4f; }
-  .html-wysiwyg-toolbar-select:hover { background-color: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
-  .html-wysiwyg-toolbar-select option { background: #ffffff; color: #1c1c1e; }
-  .html-wysiwyg-toolbar-select {
+  .finesse-toolbar-sep { background: rgba(0, 0, 0, 0.10); }
+  .finesse-toolbar-select { color: #4a4a4f; }
+  .finesse-toolbar-select:hover { background-color: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
+  .finesse-toolbar-select option { background: #ffffff; color: #1c1c1e; }
+  .finesse-toolbar-select {
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path fill='%234a4a4f' d='M2 4l3 3 3-3z'/></svg>");
   }
 }
@@ -175,7 +175,7 @@ function ensureStyle(): void {
   if (cssInjected) return;
   cssInjected = true;
   const style = document.createElement('style');
-  style.id = 'html-wysiwyg-toolbar-style';
+  style.id = 'finesse-toolbar-style';
   style.textContent = CSS;
   document.head.appendChild(style);
 }
@@ -184,7 +184,7 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
   ensureStyle();
   const root = document.createElement('div');
   root.id = TOOLBAR_ID;
-  root.className = 'html-wysiwyg-toolbar-root';
+  root.className = 'finesse-toolbar-root';
   root.setAttribute('role', 'toolbar');
   root.setAttribute('aria-label', 'Text formatting');
   root.dataset.visible = 'false';
@@ -200,14 +200,14 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
   for (const spec of specs) {
     if (spec.kind === 'separator') {
       const sep = document.createElement('span');
-      sep.className = 'html-wysiwyg-toolbar-sep';
+      sep.className = 'finesse-toolbar-sep';
       sep.setAttribute('aria-hidden', 'true');
       root.appendChild(sep);
       continue;
     }
     if (spec.kind === 'select') {
       const select = document.createElement('select');
-      select.className = 'html-wysiwyg-toolbar-select';
+      select.className = 'finesse-toolbar-select';
       select.dataset.name = spec.name;
       select.title = spec.label;
       select.setAttribute('aria-label', spec.label);
@@ -230,7 +230,7 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
     }
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'html-wysiwyg-toolbar-btn';
+    btn.className = 'finesse-toolbar-btn';
     btn.dataset.name = spec.name;
     btn.title = spec.shortcut ? `${spec.label} (${spec.shortcut})` : spec.label;
     btn.setAttribute('aria-label', spec.label);

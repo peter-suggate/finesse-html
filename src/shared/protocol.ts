@@ -3,7 +3,7 @@
 // ── Host → Iframe ─────────────────────────────────────────────────────────
 
 export type OffsetMap = {
-  type: "offsetMap";
+  type: 'offsetMap';
   documentVersion: number;
   /** Every selectable/removable element in document order. Includes blocks. */
   elements: Array<{
@@ -35,25 +35,25 @@ export type OffsetMap = {
 };
 
 export type Reload = {
-  type: "reload";
-  reason: "external-edit" | "stale-commit" | "config-changed";
+  type: 'reload';
+  reason: 'external-edit' | 'stale-commit' | 'config-changed';
 };
 
 export type EditAck = {
-  type: "editAck";
+  type: 'editAck';
   documentVersion: number;
   /** New offset map shipped alongside the ack so the iframe can resume editing. */
   offsetMap: OffsetMap;
 };
 
 export type StaleCommit = {
-  type: "staleCommit";
+  type: 'staleCommit';
   expectedVersion: number;
   actualVersion: number;
 };
 
 export type FileMeta = {
-  type: "fileMeta";
+  type: 'fileMeta';
   /** Workspace-relative path of the file being previewed. */
   path: string;
   /** True iff template syntax was detected anywhere in editable text nodes. */
@@ -61,11 +61,22 @@ export type FileMeta = {
 };
 
 export type DocumentState = {
-  type: "documentState";
+  type: 'documentState';
   /** Whether the underlying TextDocument has unsaved changes. */
   isDirty: boolean;
   /** Whether host-side auto-save-after-commit is currently enabled. */
   autoSave: boolean;
+  /** Whether the preview has a Finesse edit available to undo. */
+  canUndo: boolean;
+  /** Whether the preview has a Finesse edit available to redo. */
+  canRedo: boolean;
+};
+
+export type AgentSelectionState = {
+  type: 'agentSelectionState';
+  selected: boolean;
+  label?: string;
+  agentRunning: boolean;
 };
 
 export type HostMessage =
@@ -74,23 +85,24 @@ export type HostMessage =
   | EditAck
   | StaleCommit
   | FileMeta
-  | DocumentState;
+  | DocumentState
+  | AgentSelectionState;
 
 // ── Iframe → Host ─────────────────────────────────────────────────────────
 
 export type EditCommit = {
-  type: "editCommit";
+  type: 'editCommit';
   documentVersion: number;
   edits: Array<{ nodeId: number; newText: string }>;
 };
 
 export type EditCancel = {
-  type: "editCancel";
+  type: 'editCancel';
   blockId: number;
 };
 
 export type EditRemove = {
-  type: "editRemove";
+  type: 'editRemove';
   documentVersion: number;
   /** Element ids to remove from source, in any order. Host splices right-to-left. */
   elementIds: number[];
@@ -106,7 +118,7 @@ export type EditRemove = {
  * preserved verbatim.
  */
 export type EditBlockHtml = {
-  type: "editBlockHtml";
+  type: 'editBlockHtml';
   documentVersion: number;
   blockId: number;
   newInnerHtml: string;
@@ -119,7 +131,7 @@ export type EditBlockHtml = {
  * verbatim from source; only the opening and closing tags are rewritten.
  */
 export type EditBlockTag = {
-  type: "editBlockTag";
+  type: 'editBlockTag';
   documentVersion: number;
   blockId: number;
   /** Lowercase tag name. Must be in the allowlist (p, h1..h6). */
@@ -127,15 +139,43 @@ export type EditBlockTag = {
 };
 
 export type RuntimeError = {
-  type: "runtimeError";
+  type: 'runtimeError';
   message: string;
   stack?: string;
 };
 
-export type Ready = { type: "ready" };
+export type Ready = { type: 'ready' };
 
 /** Iframe asks host to save the underlying document (Cmd+S inside the preview). */
-export type SaveRequest = { type: "saveRequest" };
+export type SaveRequest = { type: 'saveRequest' };
+
+/** Iframe asks host to undo the most recent committed edit. */
+export type UndoRequest = { type: 'undoRequest' };
+
+/** Iframe asks host to redo the most recently undone edit. */
+export type RedoRequest = { type: 'redoRequest' };
+
+export type ElementSelectionSnapshot = {
+  documentVersion: number;
+  elementId: number;
+  blockId?: number;
+  tagName: string;
+  domPath: string;
+  selectorHints: string[];
+  textPreview: string;
+  outerHtmlPreview: string;
+  rect: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+};
+
+export type ElementSelectionChanged = {
+  type: 'elementSelectionChanged';
+  selection: ElementSelectionSnapshot | null;
+};
 
 export type IframeMessage =
   | EditCommit
@@ -145,4 +185,7 @@ export type IframeMessage =
   | EditBlockTag
   | RuntimeError
   | Ready
-  | SaveRequest;
+  | SaveRequest
+  | UndoRequest
+  | RedoRequest
+  | ElementSelectionChanged;

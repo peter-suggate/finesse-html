@@ -11,6 +11,11 @@ import {
   computeBlockTagSplices,
 } from './blockTagTransform';
 import { computeBlockHtmlSplices } from './computeBlockHtmlSplices';
+import {
+  computeInverseSplices,
+  type SpliceOp,
+  type UndoEntry,
+} from './undoStack';
 
 /**
  * Optional pre-splice transform applied to user-provided replacement text.
@@ -57,8 +62,128 @@ export interface ApplyBlockTagOpts {
 }
 
 export type ApplyEditResult =
+  | { ok: true; newVersion: number; undoEntry: UndoEntry }
+  | {
+      ok: false;
+      reason: 'stale' | 'no-offsets' | 'apply-failed';
+      expected: number;
+      actual: number;
+    };
+
+/**
+ * Apply a list of splices to `document` as one WorkspaceEdit, returning the
+ * inverse splice set so callers can build undo entries. Right-to-left
+ * ordering is applied internally; the input list may be in any order.
+ *
+ * Returns an empty undo entry if the splice list is empty (the doc isn't
+ * touched and the version doesn't advance).
+ */
+async function applySplicesWithInverse(
+  document: vscode.TextDocument,
+  splices: readonly SpliceOp[],
+  beforeApply: (expectedVersion: number) => void,
+): Promise<
+  | { ok: true; entry: UndoEntry }
+  | { ok: false; reason: 'apply-failed'; expected: number; actual: number }
+> {
+  const versionBefore = document.version;
+  if (splices.length === 0) {
+    return {
+      ok: true,
+      entry: {
+        forward: [],
+        inverse: [],
+        versionBefore,
+        versionAfter: versionBefore,
+      },
+    };
+  }
+  const sourceBefore = document.getText();
+  const inverse = computeInverseSplices(sourceBefore, splices);
+
+  const edit = new vscode.WorkspaceEdit();
+  const ordered = [...splices].sort((a, b) => b.startOffset - a.startOffset);
+  for (const s of ordered) {
+    const startPos = document.positionAt(s.startOffset);
+    const endPos = document.positionAt(s.endOffset);
+    edit.replace(document.uri, new vscode.Range(startPos, endPos), s.replacement);
+  }
+  const expectedVersion = versionBefore + 1;
+  beforeApply(expectedVersion);
+  const success = await vscode.workspace.applyEdit(edit);
+  if (!success) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: expectedVersion,
+      actual: document.version,
+    };
+  }
+  return {
+    ok: true,
+    entry: {
+      forward: splices,
+      inverse,
+      versionBefore,
+      versionAfter: document.version,
+    },
+  };
+}
+
+/**
+ * Apply a pre-recorded splice list (forward or inverse) without re-deriving
+ * it. Used by undo (apply inverse) and redo (apply forward) from an
+ * {@link UndoEntry}.
+ */
+export async function applyRecordedSplices(
+  document: vscode.TextDocument,
+  splices: readonly SpliceOp[],
+  expectedDocVersion: number,
+  beforeApply: (expectedVersion: number) => void,
+): Promise<
   | { ok: true; newVersion: number }
-  | { ok: false; reason: 'stale' | 'no-offsets' | 'apply-failed'; expected: number; actual: number };
+  | {
+      ok: false;
+      reason: 'stale' | 'apply-failed';
+      expected: number;
+      actual: number;
+    }
+> {
+  if (document.version !== expectedDocVersion) {
+    return {
+      ok: false,
+      reason: 'stale',
+      expected: expectedDocVersion,
+      actual: document.version,
+    };
+  }
+  if (splices.length === 0) {
+    return { ok: true, newVersion: document.version };
+  }
+  const edit = new vscode.WorkspaceEdit();
+  const ordered = [...splices].sort((a, b) => b.startOffset - a.startOffset);
+  for (const s of ordered) {
+    const startPos = document.positionAt(s.startOffset);
+    const endPos = document.positionAt(s.endOffset);
+    edit.replace(document.uri, new vscode.Range(startPos, endPos), s.replacement);
+  }
+  const expectedVersion = document.version + 1;
+  beforeApply(expectedVersion);
+  const success = await vscode.workspace.applyEdit(edit);
+  if (!success) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: expectedVersion,
+      actual: document.version,
+    };
+  }
+  return { ok: true, newVersion: document.version };
+}
+
+function emptyUndoEntry(version: number): UndoEntry {
+  return { forward: [], inverse: [], versionBefore: version, versionAfter: version };
+}
 
 export async function applyEditCommit(opts: ApplyEditOpts): Promise<ApplyEditResult> {
   const { document, currentVersion, currentOffsetMap, commit } = opts;
@@ -87,47 +212,24 @@ export async function applyEditCommit(opts: ApplyEditOpts): Promise<ApplyEditRes
     lookup.set(tn.nodeId, tn);
   }
 
-  type Resolved = {
-    nodeId: number;
-    newText: string;
-    startOffset: number;
-    endOffset: number;
-  };
-  const sortable: Resolved[] = [];
+  const escape = opts.escapeReplacement ?? identity;
+  const splices: SpliceOp[] = [];
   for (const e of commit.edits) {
     const tn = lookup.get(e.nodeId);
     if (!tn) continue;
-    sortable.push({
-      nodeId: e.nodeId,
-      newText: e.newText,
+    splices.push({
       startOffset: tn.startOffset,
       endOffset: tn.endOffset,
+      replacement: escape(e.newText),
     });
   }
-  if (sortable.length === 0) {
-    return { ok: true, newVersion: currentVersion };
+  if (splices.length === 0) {
+    return { ok: true, newVersion: currentVersion, undoEntry: emptyUndoEntry(currentVersion) };
   }
-  sortable.sort((a, b) => b.startOffset - a.startOffset);
 
-  const escape = opts.escapeReplacement ?? identity;
-  const edit = new vscode.WorkspaceEdit();
-  for (const e of sortable) {
-    const startPos = document.positionAt(e.startOffset);
-    const endPos = document.positionAt(e.endOffset);
-    edit.replace(document.uri, new vscode.Range(startPos, endPos), escape(e.newText));
-  }
-  const expectedVersion = document.version + 1;
-  opts.beforeApply(expectedVersion);
-  const success = await vscode.workspace.applyEdit(edit);
-  if (!success) {
-    return {
-      ok: false,
-      reason: 'apply-failed',
-      expected: expectedVersion,
-      actual: document.version,
-    };
-  }
-  return { ok: true, newVersion: document.version };
+  const result = await applySplicesWithInverse(document, splices, opts.beforeApply);
+  if (!result.ok) return result;
+  return { ok: true, newVersion: document.version, undoEntry: result.entry };
 }
 
 export async function applyRemoveCommit(opts: ApplyRemoveOpts): Promise<ApplyEditResult> {
@@ -154,39 +256,26 @@ export async function applyRemoveCommit(opts: ApplyRemoveOpts): Promise<ApplyEdi
     elementLookup.set(el.elementId, { startOffset: el.startOffset, endOffset: el.endOffset });
   }
 
-  type Range = { startOffset: number; endOffset: number };
-  const ranges: Range[] = [];
+  const source = document.getText();
+  const splices: SpliceOp[] = [];
   for (const elementId of commit.elementIds) {
     const r = elementLookup.get(elementId);
     if (!r) continue;
     if (r.endOffset <= r.startOffset) continue;
-    ranges.push({ ...r });
-  }
-  if (ranges.length === 0) {
-    return { ok: true, newVersion: currentVersion };
-  }
-  ranges.sort((a, b) => b.startOffset - a.startOffset);
-
-  const source = document.getText();
-  const edit = new vscode.WorkspaceEdit();
-  for (const r of ranges) {
     const expanded = expandRangeToTrimWhitespace(source, r.startOffset, r.endOffset);
-    const startPos = document.positionAt(expanded.startOffset);
-    const endPos = document.positionAt(expanded.endOffset);
-    edit.replace(document.uri, new vscode.Range(startPos, endPos), '');
+    splices.push({
+      startOffset: expanded.startOffset,
+      endOffset: expanded.endOffset,
+      replacement: '',
+    });
   }
-  const expectedVersion = document.version + 1;
-  opts.beforeApply(expectedVersion);
-  const success = await vscode.workspace.applyEdit(edit);
-  if (!success) {
-    return {
-      ok: false,
-      reason: 'apply-failed',
-      expected: expectedVersion,
-      actual: document.version,
-    };
+  if (splices.length === 0) {
+    return { ok: true, newVersion: currentVersion, undoEntry: emptyUndoEntry(currentVersion) };
   }
-  return { ok: true, newVersion: document.version };
+
+  const result = await applySplicesWithInverse(document, splices, opts.beforeApply);
+  if (!result.ok) return result;
+  return { ok: true, newVersion: document.version, undoEntry: result.entry };
 }
 
 export async function applyBlockHtmlCommit(opts: ApplyBlockHtmlOpts): Promise<ApplyEditResult> {
@@ -224,24 +313,15 @@ export async function applyBlockHtmlCommit(opts: ApplyBlockHtmlOpts): Promise<Ap
   }
 
   const escape = opts.escapeReplacement ?? identity;
-  const edit = new vscode.WorkspaceEdit();
-  for (const op of result.splices) {
-    const startPos = document.positionAt(op.startOffset);
-    const endPos = document.positionAt(op.endOffset);
-    edit.replace(document.uri, new vscode.Range(startPos, endPos), escape(op.replacement));
-  }
-  const expectedVersion = document.version + 1;
-  opts.beforeApply(expectedVersion);
-  const success = await vscode.workspace.applyEdit(edit);
-  if (!success) {
-    return {
-      ok: false,
-      reason: 'apply-failed',
-      expected: expectedVersion,
-      actual: document.version,
-    };
-  }
-  return { ok: true, newVersion: document.version };
+  const splices: SpliceOp[] = result.splices.map((op) => ({
+    startOffset: op.startOffset,
+    endOffset: op.endOffset,
+    replacement: escape(op.replacement),
+  }));
+
+  const applied = await applySplicesWithInverse(document, splices, opts.beforeApply);
+  if (!applied.ok) return applied;
+  return { ok: true, newVersion: document.version, undoEntry: applied.entry };
 }
 
 export async function applyBlockTagCommit(opts: ApplyBlockTagOpts): Promise<ApplyEditResult> {
@@ -300,26 +380,9 @@ export async function applyBlockTagCommit(opts: ApplyBlockTagOpts): Promise<Appl
     };
   }
 
-  const edit = new vscode.WorkspaceEdit();
-  // Right-to-left so leading offsets stay valid.
-  const ordered = [...splices].sort((a, b) => b.startOffset - a.startOffset);
-  for (const s of ordered) {
-    const startPos = document.positionAt(s.startOffset);
-    const endPos = document.positionAt(s.endOffset);
-    edit.replace(document.uri, new vscode.Range(startPos, endPos), s.replacement);
-  }
-  const expectedVersion = document.version + 1;
-  opts.beforeApply(expectedVersion);
-  const success = await vscode.workspace.applyEdit(edit);
-  if (!success) {
-    return {
-      ok: false,
-      reason: 'apply-failed',
-      expected: expectedVersion,
-      actual: document.version,
-    };
-  }
-  return { ok: true, newVersion: document.version };
+  const applied = await applySplicesWithInverse(document, splices, opts.beforeApply);
+  if (!applied.ok) return applied;
+  return { ok: true, newVersion: document.version, undoEntry: applied.entry };
 }
 
 /**

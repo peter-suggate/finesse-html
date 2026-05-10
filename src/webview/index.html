@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>HTML WYSIWYG</title>
+    <title>Finesse</title>
     <style>
       :root {
         color-scheme: dark light;
@@ -21,6 +21,7 @@
       #status {
         display: flex;
         gap: 12px;
+        align-items: center;
         padding: 4px 12px;
         font-size: 11px;
         background: var(--vscode-statusBar-background);
@@ -29,6 +30,49 @@
       }
       #status .muted {
         opacity: 0.7;
+      }
+      #status .grow {
+        flex: 1;
+      }
+      #status .dirty-dot {
+        color: #e2a04a;
+        font-size: 13px;
+        line-height: 1;
+        opacity: 0;
+        transition: opacity 100ms ease-out;
+      }
+      #status .dirty-dot.is-dirty {
+        opacity: 1;
+      }
+      #status button.tool {
+        font: inherit;
+        font-size: 11px;
+        background: transparent;
+        color: inherit;
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 2px;
+        padding: 1px 8px;
+        cursor: pointer;
+        opacity: 0.85;
+      }
+      #status button.tool:hover:not(:disabled) {
+        opacity: 1;
+        background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.06));
+      }
+      #status button.tool:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #status label.toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+        user-select: none;
+        opacity: 0.85;
+      }
+      #status label.toggle input {
+        margin: 0;
       }
       #banners {
         display: flex;
@@ -84,12 +128,39 @@
   </head>
   <body>
     <div id="status" role="status">
+      <span id="status-dirty" class="dirty-dot" aria-hidden="true">●</span>
       <span id="status-file" class="muted">no file</span>
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
       <span id="status-locked" class="muted" hidden>editing locked</span>
+      <span class="grow"></span>
+      <label class="toggle" title="Save automatically after each edit">
+        <input id="status-autosave" type="checkbox" />
+        <span>Auto-save</span>
+      </label>
+      <button
+        id="status-discard"
+        class="tool"
+        type="button"
+        title="Discard unsaved changes"
+        disabled
+      >
+        Discard
+      </button>
+      <button id="status-undo" class="tool" type="button" title="Undo Finesse edit (⌘Z)" disabled>
+        Undo
+      </button>
+      <button id="status-redo" class="tool" type="button" title="Redo Finesse edit (⇧⌘Z)" disabled>
+        Redo
+      </button>
+      <button id="status-save" class="tool" type="button" title="Save (⌘S)" disabled>Save</button>
     </div>
-    <div id="banners" role="region" aria-label="HTML WYSIWYG notifications" aria-live="polite"></div>
+    <div
+      id="banners"
+      role="region"
+      aria-label="Finesse notifications"
+      aria-live="polite"
+    ></div>
     <div id="frame-wrap">
       <iframe
         id="frame"

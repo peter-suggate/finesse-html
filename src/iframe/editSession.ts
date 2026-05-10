@@ -1,4 +1,9 @@
-import type { FileMeta, IframeMessage, OffsetMap } from '../shared/protocol';
+import type {
+  ElementSelectionSnapshot,
+  FileMeta,
+  IframeMessage,
+  OffsetMap,
+} from '../shared/protocol';
 import { computeEdits } from './diff';
 
 export type EditState =
@@ -64,6 +69,10 @@ export interface EditSession {
   selectElement(el: HTMLElement): void;
   /** Ask the host to save the underlying document. */
   requestSave(): void;
+  /** Ask the host to undo the most recent committed edit. */
+  requestUndo(): void;
+  /** Ask the host to redo the most recently undone edit. */
+  requestRedo(): void;
   isLocked(): boolean;
   hasActiveBlock(): boolean;
   activeBlockElement(): HTMLElement | null;
@@ -79,6 +88,10 @@ export interface EditSession {
   onEditStateChange(listener: (state: EditState) => void): () => void;
   /** Lookup the blockId for a known block element. */
   blockIdFor(el: HTMLElement): number | null;
+  /** Build a source-backed snapshot for the currently selected element. */
+  describeElement(el: HTMLElement): ElementSelectionSnapshot | null;
+  /** Tell the host which element the user has selected for agent context. */
+  announceElementSelection(el: HTMLElement | null): void;
   /**
    * Send a structural-edit commit (block innerHTML replace). Skips the
    * text-node-id pipe entirely. Caller is responsible for clearing
@@ -134,11 +147,11 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   function rebuild(): void {
     // Restore prior tabindex/role attrs we may have set on editable blocks.
     for (const el of elementToBlockId.keys()) {
-      if (el.dataset.htmlWysiwygApplied === 'true') {
+      if (el.dataset.finesseApplied === 'true') {
         el.removeAttribute('tabindex');
         el.removeAttribute('role');
         el.removeAttribute('aria-label');
-        delete el.dataset.htmlWysiwygApplied;
+        delete el.dataset.finesseApplied;
       }
     }
     elementToBlockId = new Map();
@@ -148,13 +161,13 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     elementIdToElement = new Map();
     if (!offsetMap) return;
 
-    // Element id mapping comes from data-html-wysiwyg-id attributes the host
+    // Element id mapping comes from data-finesse-id attributes the host
     // splices in at serve time. Robust against implicit DOM insertions like
     // browser-added <tbody>.
-    const tagged = document.body?.querySelectorAll('[data-html-wysiwyg-id]') ?? [];
+    const tagged = document.body?.querySelectorAll('[data-finesse-id]') ?? [];
     for (const el of Array.from(tagged)) {
       if (!(el instanceof HTMLElement)) continue;
-      const idStr = el.getAttribute('data-html-wysiwyg-id');
+      const idStr = el.getAttribute('data-finesse-id');
       if (!idStr) continue;
       const id = Number.parseInt(idStr, 10);
       if (Number.isNaN(id)) continue;
@@ -182,13 +195,13 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   }
 
   function applyA11yAttrs(el: HTMLElement): void {
-    if (el.dataset.htmlWysiwygApplied === 'true') return;
+    if (el.dataset.finesseApplied === 'true') return;
     if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
     if (!el.hasAttribute('role')) el.setAttribute('role', 'region');
     if (!el.hasAttribute('aria-label')) {
       el.setAttribute('aria-label', `Editable ${el.tagName.toLowerCase()}`);
     }
-    el.dataset.htmlWysiwygApplied = 'true';
+    el.dataset.finesseApplied = 'true';
   }
 
   function walk(
@@ -203,10 +216,10 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       const tag = el.tagName.toLowerCase();
       if (SKIP_SUBTREE_TAGS.has(tag)) return;
       if (
-        el.id === 'html-wysiwyg-hover' ||
-        el.id === 'html-wysiwyg-selection' ||
-        el.id === 'html-wysiwyg-delete' ||
-        el.id === 'html-wysiwyg-toolbar'
+        el.id === 'finesse-hover' ||
+        el.id === 'finesse-selection' ||
+        el.id === 'finesse-delete' ||
+        el.id === 'finesse-toolbar'
       ) {
         return;
       }
@@ -406,11 +419,19 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     opts.postToParent({ type: 'saveRequest' });
   }
 
+  function requestUndo(): void {
+    opts.postToParent({ type: 'undoRequest' });
+  }
+
+  function requestRedo(): void {
+    opts.postToParent({ type: 'redoRequest' });
+  }
+
   function selectElement(el: HTMLElement): void {
     if (isLocked()) return;
     if (!el.hasAttribute('tabindex')) {
       el.setAttribute('tabindex', '-1');
-      el.dataset.htmlWysiwygSelTab = 'true';
+      el.dataset.finesseSelTab = 'true';
     }
     el.focus({ preventScroll: true });
   }
@@ -493,6 +514,39 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     return elementToBlockId.get(el) ?? null;
   }
 
+  function describeElement(el: HTMLElement): ElementSelectionSnapshot | null {
+    if (!offsetMap) return null;
+    const elementId = elementToElementId.get(el);
+    if (elementId === undefined) return null;
+    const element = offsetMap.elements.find((e) => e.elementId === elementId);
+    if (!element) return null;
+    const blockId = elementToBlockId.get(el);
+    const rect = el.getBoundingClientRect();
+    return {
+      documentVersion: offsetMap.documentVersion,
+      elementId,
+      blockId,
+      tagName: element.tagName || el.tagName.toLowerCase(),
+      domPath: domPathFor(el),
+      selectorHints: selectorHintsFor(el),
+      textPreview: limit(el.innerText || el.textContent || '', 500),
+      outerHtmlPreview: limit(el.outerHTML, 4000),
+      rect: {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      },
+    };
+  }
+
+  function announceElementSelection(el: HTMLElement | null): void {
+    opts.postToParent({
+      type: 'elementSelectionChanged',
+      selection: el ? describeElement(el) : null,
+    });
+  }
+
   function sendBlockHtmlCommit(blockId: number, newInnerHtml: string): void {
     if (!offsetMap) return;
     opts.postToParent({
@@ -534,6 +588,8 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     removeElement,
     selectElement,
     requestSave,
+    requestUndo,
+    requestRedo,
     isLocked,
     hasActiveBlock,
     activeBlockElement,
@@ -542,11 +598,63 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     onStale,
     onEditStateChange,
     blockIdFor,
+    describeElement,
+    announceElementSelection,
     sendBlockHtmlCommit,
     sendBlockTagCommit,
     setPendingTag,
     pendingTag,
   };
+}
+
+function limit(value: string, max: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}...`;
+}
+
+function selectorHintsFor(el: HTMLElement): string[] {
+  const hints: string[] = [];
+  if (el.id) hints.push(`#${cssEscape(el.id)}`);
+  for (const cls of Array.from(el.classList).slice(0, 4)) {
+    hints.push(`.${cssEscape(cls)}`);
+  }
+  for (const attr of ['aria-label', 'role', 'name', 'href', 'src']) {
+    const value = el.getAttribute(attr);
+    if (value) hints.push(`[${attr}="${value.replace(/"/g, '\\"')}"]`);
+  }
+  return hints;
+}
+
+function domPathFor(el: HTMLElement): string {
+  const parts: string[] = [];
+  let cur: HTMLElement | null = el;
+  while (cur && cur !== document.body && cur !== document.documentElement) {
+    const tag = cur.tagName.toLowerCase();
+    const parent: HTMLElement | null = cur.parentElement;
+    if (!parent) {
+      parts.unshift(tag);
+      break;
+    }
+    const sameTagSiblings: Element[] = Array.from(parent.children).filter(
+      (child) => child.tagName.toLowerCase() === tag,
+    );
+    if (sameTagSiblings.length <= 1) {
+      parts.unshift(tag);
+    } else {
+      const index = sameTagSiblings.indexOf(cur) + 1;
+      parts.unshift(`${tag}:nth-of-type(${index})`);
+    }
+    cur = parent;
+  }
+  return parts.length > 0 ? `body > ${parts.join(' > ')}` : 'body';
+}
+
+function cssEscape(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(value);
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
 }
 
 function placeCaretAtEnd(el: HTMLElement): void {

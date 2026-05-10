@@ -8,6 +8,7 @@ export interface ResolvedConfig {
   reloadDebounceMs: number;
   openOnHtmlOpen: boolean;
   aiCommand: string;
+  agentCursorModel: string;
 }
 
 const DEFAULT_TEMPLATE_PATTERNS: readonly RegExp[] = [
@@ -18,7 +19,7 @@ const DEFAULT_TEMPLATE_PATTERNS: readonly RegExp[] = [
 ];
 
 export function readConfig(): ResolvedConfig {
-  const cfg = vscode.workspace.getConfiguration('htmlWysiwyg');
+  const cfg = vscode.workspace.getConfiguration('finesse');
   const portRaw = cfg.get<number | string>('port', 'auto');
   const port: number | 'auto' = typeof portRaw === 'number' ? portRaw : 'auto';
   const tokenSources = cfg.get<string[]>('templateTokens', []);
@@ -35,12 +36,13 @@ export function readConfig(): ResolvedConfig {
     reloadDebounceMs: cfg.get<number>('reloadDebounceMs', 150),
     openOnHtmlOpen: cfg.get<boolean>('openOnHtmlOpen', false),
     aiCommand: cfg.get<string>('aiCommand', ''),
+    agentCursorModel: cfg.get<string>('agent.cursorModel', 'composer-2'),
   };
 }
 
 export function onConfigChange(handler: (cfg: ResolvedConfig) => void): vscode.Disposable {
   return vscode.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration('htmlWysiwyg')) {
+    if (event.affectsConfiguration('finesse')) {
       handler(readConfig());
     }
   });

@@ -69,7 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (doc.languageId !== 'html') return;
       // Only auto-open if there isn't already a panel for it.
       if (state.panels.has(doc.uri.toString())) return;
-      void vscode.commands.executeCommand('htmlWysiwyg.openPreview');
+      void vscode.commands.executeCommand('finesse.openPreview');
     }),
     onConfigChange((cfg) => {
       if (!state) return;

@@ -5,10 +5,10 @@
  * non-empty string on confirm.
  */
 
-const POPOVER_ID = 'html-wysiwyg-link-popover';
+const POPOVER_ID = 'finesse-link-popover';
 
 const CSS = `
-.html-wysiwyg-link-popover {
+.finesse-link-popover {
   position: fixed;
   z-index: 2147483646;
   display: flex;
@@ -26,11 +26,11 @@ const CSS = `
   transform: translateY(2px);
   transition: opacity 100ms ease-out, transform 100ms ease-out;
 }
-.html-wysiwyg-link-popover[data-visible="true"] {
+.finesse-link-popover[data-visible="true"] {
   opacity: 1;
   transform: translateY(0);
 }
-.html-wysiwyg-link-popover input {
+.finesse-link-popover input {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
@@ -40,11 +40,11 @@ const CSS = `
   width: 280px;
   outline: none;
 }
-.html-wysiwyg-link-popover input:focus {
+.finesse-link-popover input:focus {
   border-color: rgba(108, 176, 255, 0.6);
   background: rgba(255, 255, 255, 0.12);
 }
-.html-wysiwyg-link-popover button {
+.finesse-link-popover button {
   appearance: none;
   background: transparent;
   border: none;
@@ -55,28 +55,28 @@ const CSS = `
   border-radius: 4px;
   cursor: pointer;
 }
-.html-wysiwyg-link-popover button:hover { background: rgba(255, 255, 255, 0.10); color: #fff; }
-.html-wysiwyg-link-popover button.primary { color: #6cb0ff; }
-.html-wysiwyg-link-popover button.primary:hover { background: rgba(108, 176, 255, 0.16); }
+.finesse-link-popover button:hover { background: rgba(255, 255, 255, 0.10); color: #fff; }
+.finesse-link-popover button.primary { color: #6cb0ff; }
+.finesse-link-popover button.primary:hover { background: rgba(108, 176, 255, 0.16); }
 @media (prefers-color-scheme: light) {
-  .html-wysiwyg-link-popover {
+  .finesse-link-popover {
     background: rgba(255, 255, 255, 0.98);
     color: #1c1c1e;
     border-color: rgba(0, 0, 0, 0.08);
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
   }
-  .html-wysiwyg-link-popover input {
+  .finesse-link-popover input {
     background: rgba(0, 0, 0, 0.04);
     border-color: rgba(0, 0, 0, 0.10);
   }
-  .html-wysiwyg-link-popover input:focus {
+  .finesse-link-popover input:focus {
     background: rgba(0, 0, 0, 0.06);
     border-color: rgba(30, 111, 217, 0.6);
   }
-  .html-wysiwyg-link-popover button { color: #4a4a4f; }
-  .html-wysiwyg-link-popover button:hover { background: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
-  .html-wysiwyg-link-popover button.primary { color: #1e6fd9; }
-  .html-wysiwyg-link-popover button.primary:hover { background: rgba(30, 111, 217, 0.10); }
+  .finesse-link-popover button { color: #4a4a4f; }
+  .finesse-link-popover button:hover { background: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
+  .finesse-link-popover button.primary { color: #1e6fd9; }
+  .finesse-link-popover button.primary:hover { background: rgba(30, 111, 217, 0.10); }
 }
 `;
 
@@ -85,7 +85,7 @@ function ensureStyle(): void {
   if (cssInjected) return;
   cssInjected = true;
   const style = document.createElement('style');
-  style.id = 'html-wysiwyg-link-popover-style';
+  style.id = 'finesse-link-popover-style';
   style.textContent = CSS;
   document.head.appendChild(style);
 }
@@ -102,7 +102,7 @@ export function promptLink(opts: PromptLinkOpts): Promise<string | null> {
   return new Promise<string | null>((resolve) => {
     const root = document.createElement('div');
     root.id = POPOVER_ID;
-    root.className = 'html-wysiwyg-link-popover';
+    root.className = 'finesse-link-popover';
     root.dataset.visible = 'false';
     root.setAttribute('role', 'dialog');
     root.setAttribute('aria-label', 'Edit link');

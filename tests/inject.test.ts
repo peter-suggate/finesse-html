@@ -23,11 +23,11 @@ describe('injectElementIds', () => {
     expect(injectElementIds(html, empty)).toBe(html);
   });
 
-  it('inserts data-html-wysiwyg-id immediately after each tag name', () => {
+  it('inserts data-finesse-id immediately after each tag name', () => {
     const html = '<!doctype html><html><body><p>x</p></body></html>';
     const map = walkEditable(html, 1);
     const out = injectElementIds(html, map);
-    expect(out).toContain('<p data-html-wysiwyg-id="0">x</p>');
+    expect(out).toContain('<p data-finesse-id="0">x</p>');
   });
 
   it('preserves bytes outside the inserted attributes (only adds expected length)', () => {
@@ -35,12 +35,12 @@ describe('injectElementIds', () => {
     const map = walkEditable(html, 1);
     const out = injectElementIds(html, map);
     const expectedAdded = map.elements.reduce(
-      (sum, e) => sum + ` data-html-wysiwyg-id="${e.elementId}"`.length,
+      (sum, e) => sum + ` data-finesse-id="${e.elementId}"`.length,
       0,
     );
     expect(out.length).toBe(html.length + expectedAdded);
     // Strip injected attrs and assert original text is recovered.
-    const stripped = out.replace(/ data-html-wysiwyg-id="\d+"/g, '');
+    const stripped = out.replace(/ data-finesse-id="\d+"/g, '');
     expect(stripped).toBe(html);
   });
 
@@ -49,7 +49,7 @@ describe('injectElementIds', () => {
       '<!doctype html><html><body><a href="x" class="y">link</a></body></html>';
     const map = walkEditable(html, 1);
     const out = injectElementIds(html, map);
-    expect(out).toContain('<a data-html-wysiwyg-id="0" href="x" class="y">');
+    expect(out).toContain('<a data-finesse-id="0" href="x" class="y">');
   });
 
   it('handles void / self-closing tags', () => {
@@ -57,8 +57,8 @@ describe('injectElementIds', () => {
       '<!doctype html><html><body><hr><img src="a.png"/></body></html>';
     const map = walkEditable(html, 1);
     const out = injectElementIds(html, map);
-    expect(out).toContain('<hr data-html-wysiwyg-id="');
-    expect(out).toContain('<img data-html-wysiwyg-id="');
+    expect(out).toContain('<hr data-finesse-id="');
+    expect(out).toContain('<img data-finesse-id="');
   });
 
   it('handles many adjacent elements correctly (no offset corruption)', () => {
@@ -70,7 +70,7 @@ describe('injectElementIds', () => {
     const out = injectElementIds(html, map);
     // Each <p>N</p> should be tagged with a sequential id and N preserved.
     for (let i = 0; i < 5; i++) {
-      expect(out).toContain(`<p data-html-wysiwyg-id="${i}">${i + 1}</p>`);
+      expect(out).toContain(`<p data-finesse-id="${i}">${i + 1}</p>`);
     }
   });
 
@@ -118,7 +118,7 @@ describe('injectInstrumentation', () => {
     });
     // The literal "</script>" must NOT appear inside the init script payload —
     // it should be escaped as <\/script>.
-    const initScriptStart = out.indexOf('window.__HTML_WYSIWYG__');
+    const initScriptStart = out.indexOf('window.__FINESSE__');
     const initScriptEnd = out.indexOf('</script>', initScriptStart);
     const payload = out.slice(initScriptStart, initScriptEnd);
     expect(payload).not.toContain('</script>');

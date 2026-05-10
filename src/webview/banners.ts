@@ -45,7 +45,7 @@ export function showTemplatedBanner(opts: { onEditAnyway: () => void }): void {
   const banner = build({
     kind: 'warn',
     dataKind: 'templated',
-    text: 'WYSIWYG editing disabled: template syntax detected. Preview only.',
+    text: 'Finesse editing disabled: template syntax detected. Preview only.',
     action: { label: 'Edit anyway', onClick: opts.onEditAnyway },
   });
   banner.addEventListener('DOMNodeRemoved', () => {

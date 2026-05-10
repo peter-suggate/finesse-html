@@ -1,6 +1,6 @@
-# vscode-html-wysiwyg — Specification
+# Finesse — Specification
 
-A VS Code / Cursor extension that turns HTML files into a WYSIWYG editing surface: open an HTML file → see it rendered in a side panel → click any block-level element → edit its text inline → changes write back to the source file with byte-perfect fidelity for everything you didn't touch.
+A VS Code / Cursor extension that turns HTML files into a precise editing surface: open an HTML file → see it rendered in a side panel → click any block-level element → edit its text inline → changes write back to the source file with byte-perfect fidelity for everything you didn't touch.
 
 **Status:** Draft. Design phase complete. Implementation broken into five parallel streams (§7).
 
@@ -74,7 +74,7 @@ On every edit commit:
 2. Host validates `documentVersion === doc.version`. Mismatch → reply `StaleCommit`, instruct iframe to revert + reload.
 3. Sort edits by `startOffset` descending.
 4. Build a single `WorkspaceEdit` replacing `[startOffset, endOffset)` with `newText` for each edit. Right-to-left ordering keeps the remaining offsets valid through the apply.
-5. `workspace.applyEdit()` with origin tag `htmlWysiwyg.commit` (used by the document watcher to distinguish self-edits from external changes — see §6.1).
+5. `workspace.applyEdit()` with origin tag `finesse.commit` (used by the document watcher to distinguish self-edits from external changes — see §6.1).
 6. Re-walk → emit fresh `OffsetMap` to iframe (no iframe reload; DOM already reflects the change visually, we're just refreshing bookkeeping).
 
 **Why this is safe:** byte ranges outside the edited spans are never touched. Comments, whitespace, attribute quoting, and indentation survive verbatim. Diffs are minimal and reviewable.
@@ -138,11 +138,11 @@ const TEMPLATE_PATTERNS = [
 ];
 ```
 
-**v1 behavior:** if *any* editable text node matches *any* pattern, the entire file is treated as templated. Show a banner: **"WYSIWYG editing disabled: template syntax detected. Preview only."** The iframe still renders the file; click-to-edit is disabled across the board.
+**v1 behavior:** if *any* editable text node matches *any* pattern, the entire file is treated as templated. Show a banner: **"Finesse editing disabled: template syntax detected. Preview only."** The iframe still renders the file; click-to-edit is disabled across the board.
 
 Per-element opt-out (always honored): elements with `data-no-edit` attribute, or any descendant of `contenteditable="false"`.
 
-User override (Phase 2): command `htmlWysiwyg.editAnyway` writes `data-html-wysiwyg-allow="true"` on `<html>`, after which the editability rule re-evaluates per-text-node (template-bearing text nodes still locked). Surface as a banner action.
+User override (Phase 2): command `finesse.editAnyway` writes `data-finesse-allow="true"` on `<html>`, after which the editability rule re-evaluates per-text-node (template-bearing text nodes still locked). Surface as a banner action.
 
 ---
 
@@ -250,7 +250,7 @@ After Phase 0, these five streams run concurrently. Each owns its directory tree
 
 | Stream | Path | Deliverable |
 |---|---|---|
-| **1A — Extension host** | `src/host/extension.ts`, `src/host/commands.ts`, `src/host/panel.ts`, `src/host/applyEdit.ts`, `src/host/documentWatcher.ts` | Activation, commands (`htmlWysiwyg.openPreview`, `…closePreview`), panel lifecycle, document-watcher with self-edit discrimination (§6.1), applyEdit pipeline (right-to-left splice with version validation). |
+| **1A — Extension host** | `src/host/extension.ts`, `src/host/commands.ts`, `src/host/panel.ts`, `src/host/applyEdit.ts`, `src/host/documentWatcher.ts` | Activation, commands (`finesse.openPreview`, `…closePreview`), panel lifecycle, document-watcher with self-edit discrimination (§6.1), applyEdit pipeline (right-to-left splice with version validation). |
 | **1B — HTTP server** | `src/host/server/server.ts`, `src/host/server/inject.ts`, `src/host/server/reloadSocket.ts` | Port management, workspace-rooted serving, traversal protection, ETag, instrumentation injection at `</body>`, WebSocket reload channel. |
 | **1C — parse5 walker** | `src/host/parse/walkEditable.ts`, `src/host/parse/templateDetect.ts`, `src/host/parse/editabilityRules.ts` | Pure functions: `walkEditable(html) → OffsetMap`, template detection, editability rules. Tested against the fixture corpus with snapshot tests (since we skip `.test.tsx`-style behavior tests, these are golden-file comparisons run from a single `pnpm verify` script). |
 | **1D — Iframe instrumentation** | `src/iframe/main.ts`, `src/iframe/overlay.ts`, `src/iframe/editSession.ts`, `src/iframe/diff.ts`, `src/iframe/pasteSanitizer.ts` | Overlay UI (hover outline, selection outline), block-container detection from offsetMap blocks, click→`contentEditable=true`, blur/Enter/Esc commit, snapshot-vs-current-DOM diff producing per-textnode edits, paste sanitizer (force `text/plain`), Esc-revert. Compiled as a separate esbuild target → `dist/iframe-runtime.js`. |
@@ -263,7 +263,7 @@ After Phase 0, these five streams run concurrently. Each owns its directory tree
 | Stream | Deliverable |
 |---|---|
 | **2A. External-edit hot-reload** | Wire §6.1 end-to-end: external save / git checkout / undo in source pane → iframe reload. |
-| **2B. Template detection UX** | Banner with override action (`htmlWysiwyg.editAnyway`), per-element `data-no-edit` honored, settings for custom token list. |
+| **2B. Template detection UX** | Banner with override action (`finesse.editAnyway`), per-element `data-no-edit` honored, settings for custom token list. |
 | **2C. Settings surface** | All settings in §9 surfaced via `package.json` `contributes.configuration` with proper schemas. |
 | **2D. Resource serving correctness** | Relative `<link>`, `<script>`, `<img>`, `<source>`, `<video>`, `@font-face url(...)` resolved against workspace root. Clear error toast if paths escape workspace. Reload preview on referenced CSS/JS file changes. |
 | **2E. A11y + keyboard** | Tab/Shift-Tab between blocks, Enter to enter edit, Esc to cancel, screen-reader landmarks, `aria-live` for banners. |
@@ -272,7 +272,7 @@ After Phase 0, these five streams run concurrently. Each owns its directory tree
 
 | Stream | Deliverable |
 |---|---|
-| **3A. Cursor Cmd-K passthrough** | Open-architecture command `htmlWysiwyg.actOnSelection(range)`. Setting `htmlWysiwyg.aiCommand` (string command id, default detected at activation by inspecting installed extensions). Right-click in preview → "Rewrite this with AI". |
+| **3A. Cursor Cmd-K passthrough** | Open-architecture command `finesse.actOnSelection(range)`. Setting `finesse.aiCommand` (string command id, default detected at activation by inspecting installed extensions). Right-click in preview → "Rewrite this with AI". |
 | **3B. Attribute editing** | Property panel docked beside selection: edit `href`, `src`, `alt`, `class`, `title`. Same source-splicing strategy at attribute-value granularity. |
 | **3C. Marketplace + Open VSX publishing** | `vsce publish` and `ovsx publish` in CI on tagged commits. README, screenshots, demo GIF. |
 | **3D. Optional telemetry** | Opt-in only, error reports without payloads. Use VS Code's `TelemetryLogger` API. |
@@ -282,7 +282,7 @@ After Phase 0, these five streams run concurrently. Each owns its directory tree
 ## 8. Repository layout
 
 ```
-vscode-html-wysiwyg/
+finesse-html/
 ├── package.json                  # extension manifest
 ├── tsconfig.json
 ├── tsconfig.iframe.json          # separate target for iframe bundle
@@ -341,13 +341,13 @@ vscode-html-wysiwyg/
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `htmlWysiwyg.port` | `number \| "auto"` | `"auto"` | HTTP server port, or auto-allocate. |
-| `htmlWysiwyg.editableElements` | `string[]` | computed | Override block-container selector list. |
-| `htmlWysiwyg.templateTokens` | `string[]` (regex sources) | see §5 | Patterns marking files as templated. |
-| `htmlWysiwyg.serverIdleTimeout` | `number` (ms) | `60000` | Idle shutdown after last preview closes. |
-| `htmlWysiwyg.reloadDebounceMs` | `number` | `150` | Debounce for external-edit reload triggers. |
-| `htmlWysiwyg.openOnHtmlOpen` | `boolean` | `false` | Auto-open preview when an HTML file opens. |
-| `htmlWysiwyg.aiCommand` | `string` | auto-detect | Phase 3A: command id to invoke for "Rewrite with AI". |
+| `finesse.port` | `number \| "auto"` | `"auto"` | HTTP server port, or auto-allocate. |
+| `finesse.editableElements` | `string[]` | computed | Override block-container selector list. |
+| `finesse.templateTokens` | `string[]` (regex sources) | see §5 | Patterns marking files as templated. |
+| `finesse.serverIdleTimeout` | `number` (ms) | `60000` | Idle shutdown after last preview closes. |
+| `finesse.reloadDebounceMs` | `number` | `150` | Debounce for external-edit reload triggers. |
+| `finesse.openOnHtmlOpen` | `boolean` | `false` | Auto-open preview when an HTML file opens. |
+| `finesse.aiCommand` | `string` | auto-detect | Phase 3A: command id to invoke for "Rewrite with AI". |
 
 ---
 
@@ -375,6 +375,6 @@ The Q&A that produced this spec.
 | Q5 | Commit semantics | On blur / Enter / Esc. One `WorkspaceEdit` per session. Composes with VS Code's native undo and dirty-state. Cmd+S behaves normally. |
 | Q6 | Staleness | Versioned commits + reject + reload. `documentVersion` mismatch → `StaleCommit` reply, iframe reverts and reloads. External edits trigger reload. |
 | Q7 | Templating | Plain HTML only in v1. Detect tokens; if any present, banner + lock all editing (preview still works). Per-element `data-no-edit` always honored. |
-| Q8 | AI integration | None in v1. Phase 3A: open-architecture command `htmlWysiwyg.actOnSelection`, setting `htmlWysiwyg.aiCommand`. We never hold API keys. |
-| Q9 | Repo & distribution | Personal standalone repo at `/Users/petersuggate/code/anjuna/vscode-html-wysiwyg`. Sideload during Phase 1. Publish to VS Code Marketplace + Open VSX after Phase 1 lands. |
+| Q8 | AI integration | None in v1. Phase 3A: open-architecture command `finesse.actOnSelection`, setting `finesse.aiCommand`. We never hold API keys. |
+| Q9 | Repo & distribution | Personal standalone repo at `/Users/petersuggate/code/anjuna/finesse-html`. Sideload during Phase 1. Publish to VS Code Marketplace + Open VSX after Phase 1 lands. |
 | Q10 | Phasing | Phase 0 sequential (foundation). Phase 1 = 5 parallel streams against locked protocol. Phase 2 = 5 parallel polish streams. Phase 3 = distribution + extensions. |

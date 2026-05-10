@@ -18,7 +18,7 @@ export interface PreviewServerOptions {
   runtimeBundlePath: string;
   getDocumentText: (workspaceRelativePath: string) => string | null;
   /**
-   * Pre-built preview HTML for the given path with `data-html-wysiwyg-id`
+   * Pre-built preview HTML for the given path with `data-finesse-id`
    * attrs already spliced in. Used for JS/TS files whose preview is composed
    * from template-literal bodies — the in-memory offset map for those uses
    * JS-source coordinates, so the server can't inject IDs into the served

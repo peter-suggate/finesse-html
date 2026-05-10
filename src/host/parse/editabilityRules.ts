@@ -60,7 +60,7 @@ export function hasNoEditAttr(attrs: AnyAttr[] | undefined): boolean {
 export function isEditAnywayOverride(attrs: AnyAttr[] | undefined): boolean {
   if (!attrs) return false;
   for (const a of attrs) {
-    if (a.name === 'data-html-wysiwyg-allow' && a.value === 'true') return true;
+    if (a.name === 'data-finesse-allow' && a.value === 'true') return true;
   }
   return false;
 }
