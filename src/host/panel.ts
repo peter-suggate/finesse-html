@@ -11,6 +11,7 @@ import type {
   RuntimeError,
 } from '../shared/protocol';
 import { applyEditCommit } from './applyEdit';
+import type { ResolvedConfig } from './config';
 import { detectTemplate, hasEditAnywayOverride, walkEditable } from './parse';
 
 export interface PreviewPanel {
@@ -31,6 +32,7 @@ export interface PanelDeps {
   context: vscode.ExtensionContext;
   port: number;
   workspaceRoot: string;
+  getConfig: () => ResolvedConfig;
   onDispose: () => void;
 }
 
@@ -64,10 +66,13 @@ export function createPreviewPanel(
   let expectedSelfEditVersion: number | null = null;
 
   function reparse(text: string, version: number): void {
-    const templated = detectTemplate(text);
+    const patterns = deps.getConfig().templatePatterns;
+    const templated = detectTemplate(text, patterns);
     const overrideTemplate = templated && hasEditAnywayOverride(text);
     isTemplated = templated && !overrideTemplate;
-    currentOffsetMap = isTemplated ? null : walkEditable(text, version);
+    currentOffsetMap = isTemplated
+      ? null
+      : walkEditable(text, version, { templatePatterns: patterns });
     currentVersion = version;
   }
 
@@ -268,15 +273,15 @@ function buildWebviewHtml(
     <script>window.__HTML_WYSIWYG_INIT__ = ${initJson};</script>
   </head>
   <body>
-    <div id="status">
+    <div id="status" role="status">
       <span id="status-file" class="muted">no file</span>
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
       <span id="status-locked" class="muted" hidden>editing locked</span>
     </div>
-    <div id="banners"></div>
+    <div id="banners" role="region" aria-label="HTML WYSIWYG notifications" aria-live="polite"></div>
     <div id="frame-wrap">
-      <iframe id="frame" title="HTML preview" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+      <iframe id="frame" title="HTML preview" aria-label="HTML preview" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
     </div>
     <script src="${mainJs}"></script>
   </body>

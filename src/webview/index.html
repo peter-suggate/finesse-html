@@ -83,17 +83,18 @@
     </style>
   </head>
   <body>
-    <div id="status">
+    <div id="status" role="status">
       <span id="status-file" class="muted">no file</span>
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
       <span id="status-locked" class="muted" hidden>editing locked</span>
     </div>
-    <div id="banners"></div>
+    <div id="banners" role="region" aria-label="HTML WYSIWYG notifications" aria-live="polite"></div>
     <div id="frame-wrap">
       <iframe
         id="frame"
         title="HTML preview"
+        aria-label="HTML preview"
         sandbox="allow-scripts allow-same-origin allow-forms"
       ></iframe>
     </div>

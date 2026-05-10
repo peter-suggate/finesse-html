@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { ResolvedConfig } from './config';
 import { createPreviewPanel, type PreviewPanel } from './panel';
 import type { PreviewServer } from './server';
 
@@ -8,6 +9,7 @@ export interface CommandsContext {
   deletePanel(key: string): void;
   listPanels(): PreviewPanel[];
   ensureServer(): Promise<PreviewServer>;
+  getConfig(): ResolvedConfig;
 }
 
 export function registerCommands(
@@ -54,6 +56,7 @@ async function openPreview(
     context: extContext,
     port,
     workspaceRoot,
+    getConfig: ctx.getConfig,
     onDispose: () => ctx.deletePanel(key),
   });
   ctx.setPanel(key, panel);

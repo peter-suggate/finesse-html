@@ -14,6 +14,8 @@ const CONTENT_TYPES: Record<string, string> = {
   '.js': 'application/javascript; charset=utf-8',
   '.mjs': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -108,6 +110,10 @@ class PreviewServerImpl implements PreviewServer {
     this.socket?.broadcast(workspaceRelativePath);
   }
 
+  notifyReloadAll(): void {
+    this.socket?.broadcastAll();
+  }
+
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const pathname = decodeURIComponent(url.pathname);
@@ -128,7 +134,9 @@ class PreviewServerImpl implements PreviewServer {
     const within = path.relative(this.opts.workspaceRoot, resolved);
     if (within.startsWith('..') || path.isAbsolute(within)) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Forbidden');
+      res.end(
+        `Forbidden: requested path "${pathname}" resolves outside the workspace root. The preview server only serves files under ${this.opts.workspaceRoot}.`,
+      );
       return;
     }
 

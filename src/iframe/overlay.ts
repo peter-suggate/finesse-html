@@ -96,18 +96,50 @@ export function setupOverlay(opts: OverlayOpts): void {
   });
 
   document.addEventListener('keydown', (e) => {
-    if (!session.hasActiveBlock()) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      session.cancelEdit();
-      showSelection(null);
-      restoreFocusToBody();
-    } else if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      session.commitEdit();
-      showSelection(null);
-      restoreFocusToBody();
+    if (session.hasActiveBlock()) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        const block = session.activeBlockElement();
+        session.cancelEdit();
+        showSelection(null);
+        block?.focus({ preventScroll: true });
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const block = session.activeBlockElement();
+        session.commitEdit();
+        showSelection(null);
+        block?.focus({ preventScroll: true });
+      }
+      return;
     }
+    // Not editing: Enter on a focused editable block enters edit mode.
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const focused = document.activeElement as HTMLElement | null;
+      if (!focused) return;
+      const block = session.findEditableBlock(focused);
+      if (block === focused) {
+        e.preventDefault();
+        if (session.beginEdit(block)) {
+          showSelection(block);
+          hover.style.display = 'none';
+        }
+      }
+    }
+  });
+
+  document.addEventListener('focusin', (e) => {
+    if (session.hasActiveBlock()) return;
+    const target = e.target as Element | null;
+    if (!target) return;
+    const block = session.findEditableBlock(target);
+    if (block && block === target) {
+      showSelection(block);
+      hover.style.display = 'none';
+    }
+  });
+
+  document.addEventListener('focusout', () => {
+    if (!session.hasActiveBlock()) showSelection(null);
   });
 
   document.addEventListener(
@@ -150,12 +182,3 @@ function createOverlay(style: Partial<CSSStyleDeclaration>, id: string): HTMLDiv
   return el;
 }
 
-function restoreFocusToBody(): void {
-  if (document.body && typeof document.body.focus === 'function') {
-    // Use a tabindex=-1 focus pattern so blur fires properly elsewhere.
-    const prev = document.body.getAttribute('tabindex');
-    if (prev === null) document.body.setAttribute('tabindex', '-1');
-    document.body.focus({ preventScroll: true });
-    if (prev === null) document.body.removeAttribute('tabindex');
-  }
-}

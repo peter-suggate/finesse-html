@@ -43,6 +43,15 @@ export class ReloadSocket {
     }
   }
 
+  broadcastAll(): void {
+    const msg = JSON.stringify({ type: 'reload', path: '*' });
+    for (const info of this.subs) {
+      if (info.socket.readyState === WebSocket.OPEN) {
+        info.socket.send(msg);
+      }
+    }
+  }
+
   close(): void {
     const wss = this.wss;
     if (!wss) return;

@@ -5,6 +5,8 @@ export interface PreviewServer {
   start(): Promise<number>;
   stop(): Promise<void>;
   notifyReload(workspaceRelativePath: string): void;
+  /** Broadcast a reload to every subscribed iframe (used when shared assets change). */
+  notifyReloadAll(): void;
   readonly port: number | null;
 }
 

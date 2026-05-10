@@ -54,7 +54,10 @@ export interface EditSession {
   cancelEdit(): void;
   isLocked(): boolean;
   hasActiveBlock(): boolean;
+  activeBlockElement(): HTMLElement | null;
   isInsideActive(target: Element | null): boolean;
+  /** Block elements in document order, for keyboard nav. */
+  orderedBlocks(): HTMLElement[];
   onStale(): void;
 }
 
@@ -79,6 +82,15 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   let snapshotHTML = '';
 
   function rebuild(): void {
+    // Restore prior tabindex/role attrs we may have set; we apply fresh below.
+    for (const el of elementToBlockId.keys()) {
+      if (el.dataset.htmlWysiwygApplied === 'true') {
+        el.removeAttribute('tabindex');
+        el.removeAttribute('role');
+        el.removeAttribute('aria-label');
+        delete el.dataset.htmlWysiwygApplied;
+      }
+    }
     elementToBlockId = new Map();
     blockIdToElement = new Map();
     blockIdToTextNodeIds = new Map();
@@ -86,11 +98,13 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     const blockEls: HTMLElement[] = [];
     const textNodes: Text[] = [];
     walk(document.body, [], false, blockEls, textNodes);
-    const orderedBlocks = offsetMap.blocks;
+    const blocks = offsetMap.blocks;
     const orderedTexts = offsetMap.textNodes;
-    for (let i = 0; i < orderedBlocks.length && i < blockEls.length; i++) {
-      blockIdToElement.set(orderedBlocks[i].blockId, blockEls[i]);
-      elementToBlockId.set(blockEls[i], orderedBlocks[i].blockId);
+    for (let i = 0; i < blocks.length && i < blockEls.length; i++) {
+      const el = blockEls[i];
+      blockIdToElement.set(blocks[i].blockId, el);
+      elementToBlockId.set(el, blocks[i].blockId);
+      applyA11yAttrs(el);
     }
     for (const tn of orderedTexts) {
       const list = blockIdToTextNodeIds.get(tn.blockId) ?? [];
@@ -98,6 +112,16 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       blockIdToTextNodeIds.set(tn.blockId, list);
     }
     void textNodes;
+  }
+
+  function applyA11yAttrs(el: HTMLElement): void {
+    if (el.dataset.htmlWysiwygApplied === 'true') return;
+    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    if (!el.hasAttribute('role')) el.setAttribute('role', 'region');
+    if (!el.hasAttribute('aria-label')) {
+      el.setAttribute('aria-label', `Editable ${el.tagName.toLowerCase()}`);
+    }
+    el.dataset.htmlWysiwygApplied = 'true';
   }
 
   function walk(
@@ -241,9 +265,23 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     return activeBlock !== null;
   }
 
+  function activeBlockElement(): HTMLElement | null {
+    return activeBlock;
+  }
+
   function isInsideActive(target: Element | null): boolean {
     if (!activeBlock || !target) return false;
     return activeBlock === target || activeBlock.contains(target);
+  }
+
+  function orderedBlocks(): HTMLElement[] {
+    if (!offsetMap) return [];
+    const result: HTMLElement[] = [];
+    for (const b of offsetMap.blocks) {
+      const el = blockIdToElement.get(b.blockId);
+      if (el) result.push(el);
+    }
+    return result;
   }
 
   function onStale(): void {
@@ -272,7 +310,9 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     cancelEdit,
     isLocked,
     hasActiveBlock,
+    activeBlockElement,
     isInsideActive,
+    orderedBlocks,
     onStale,
   };
 }
