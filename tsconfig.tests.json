@@ -9,7 +9,12 @@
     "src/shared/**/*",
     "src/host/parse/**/*",
     "src/host/server/inject.ts",
+    "src/host/sanitizeBlockHtml.ts",
+    "src/host/blockTagTransform.ts",
+    "src/host/computeBlockHtmlSplices.ts",
     "src/iframe/diff.ts",
+    "src/iframe/toolbar/formatHelpers.ts",
+    "src/iframe/toolbar/positioning.ts",
     "tests/**/*"
   ]
 }

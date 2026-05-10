@@ -20,6 +20,10 @@ export type OffsetMap = {
     /** Pointer into `elements`. */
     elementId: number;
     tagName: string;
+    /** Source offset just after the opening tag's `>`. Inner-content start. */
+    innerStartOffset?: number;
+    /** Source offset of the closing tag's leading `<`. Inner-content end. */
+    innerEndOffset?: number;
   }>;
   textNodes: Array<{
     nodeId: number;
@@ -92,6 +96,36 @@ export type EditRemove = {
   elementIds: number[];
 };
 
+/**
+ * Replace the inner content of a single block with a new HTML fragment.
+ * Used when a structural edit (e.g. inline formatting) changes the block's
+ * text-node identity, so the per-text-node {@link EditCommit} pipe is unsafe.
+ *
+ * The host sanitizes `newInnerHtml` against an allowlist before splicing.
+ * Bytes outside the block's `innerStartOffset..innerEndOffset` range are
+ * preserved verbatim.
+ */
+export type EditBlockHtml = {
+  type: "editBlockHtml";
+  documentVersion: number;
+  blockId: number;
+  newInnerHtml: string;
+  /** Optional: also rename the block's tag (e.g. p → h2) atomically. */
+  newTagName?: string;
+};
+
+/**
+ * Change a block's tag name (e.g. p → h2). Inner content is preserved
+ * verbatim from source; only the opening and closing tags are rewritten.
+ */
+export type EditBlockTag = {
+  type: "editBlockTag";
+  documentVersion: number;
+  blockId: number;
+  /** Lowercase tag name. Must be in the allowlist (p, h1..h6). */
+  newTagName: string;
+};
+
 export type RuntimeError = {
   type: "runtimeError";
   message: string;
@@ -107,6 +141,8 @@ export type IframeMessage =
   | EditCommit
   | EditCancel
   | EditRemove
+  | EditBlockHtml
+  | EditBlockTag
   | RuntimeError
   | Ready
   | SaveRequest;

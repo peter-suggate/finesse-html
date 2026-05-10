@@ -13,6 +13,8 @@ import { textHasTemplateToken } from './templateDetect';
 interface SourceLocation {
   startOffset: number;
   endOffset: number;
+  startTag?: { startOffset: number; endOffset: number };
+  endTag?: { startOffset: number; endOffset: number };
 }
 
 interface Parse5Node {
@@ -79,10 +81,15 @@ export function walkEditable(
     const id = nextBlockId++;
     blockIdByElement.set(el, id);
     const elementId = ensureElementId(el);
+    const loc = el.sourceCodeLocation;
+    const innerStartOffset = loc?.startTag?.endOffset;
+    const innerEndOffset = loc?.endTag?.startOffset;
     blocks.push({
       blockId: id,
       elementId: elementId ?? -1,
       tagName: el.tagName ?? '',
+      innerStartOffset,
+      innerEndOffset,
     });
     return id;
   }

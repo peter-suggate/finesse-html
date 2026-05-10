@@ -1,6 +1,10 @@
 import type { FileMeta, IframeMessage, OffsetMap } from '../shared/protocol';
 import { computeEdits } from './diff';
 
+export type EditState =
+  | { kind: 'idle' }
+  | { kind: 'editing'; block: HTMLElement; blockId: number };
+
 const BLOCK_TAGS: ReadonlySet<string> = new Set([
   'p',
   'h1',
@@ -67,6 +71,29 @@ export interface EditSession {
   /** Block elements in document order, for keyboard nav. */
   orderedBlocks(): HTMLElement[];
   onStale(): void;
+  /**
+   * Subscribe to edit-state transitions. Useful for layers like the format
+   * toolbar that need to mount/unmount in sync with edit mode. Returns an
+   * unsubscribe function.
+   */
+  onEditStateChange(listener: (state: EditState) => void): () => void;
+  /** Lookup the blockId for a known block element. */
+  blockIdFor(el: HTMLElement): number | null;
+  /**
+   * Send a structural-edit commit (block innerHTML replace). Skips the
+   * text-node-id pipe entirely. Caller is responsible for clearing
+   * contenteditable on `block` first.
+   */
+  sendBlockHtmlCommit(blockId: number, newInnerHtml: string): void;
+  /** Send a block-tag transform commit. */
+  sendBlockTagCommit(blockId: number, newTagName: string): void;
+  /**
+   * Stage a tag rename for the active block. Applied atomically with any
+   * inner edit on the next commit. Pass null to clear.
+   */
+  setPendingTag(tag: string | null): void;
+  /** Currently staged tag, or null. */
+  pendingTag(): string | null;
 }
 
 export interface SetupOpts {
@@ -89,7 +116,20 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   let activeBlock: HTMLElement | null = null;
   let activeBlockId: number | null = null;
   let snapshotTexts: string[] = [];
+  let snapshotTextNodes: Text[] = [];
   let snapshotHTML = '';
+  let pendingNewTag: string | null = null;
+  const stateListeners: Array<(state: EditState) => void> = [];
+
+  function notifyState(state: EditState): void {
+    for (const l of stateListeners) {
+      try {
+        l(state);
+      } catch (err) {
+        opts.onError(`edit-state listener: ${(err as Error).message}`, (err as Error).stack);
+      }
+    }
+  }
 
   function rebuild(): void {
     // Restore prior tabindex/role attrs we may have set on editable blocks.
@@ -162,7 +202,12 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       const el = node as HTMLElement;
       const tag = el.tagName.toLowerCase();
       if (SKIP_SUBTREE_TAGS.has(tag)) return;
-      if (el.id === 'html-wysiwyg-hover' || el.id === 'html-wysiwyg-selection' || el.id === 'html-wysiwyg-delete') {
+      if (
+        el.id === 'html-wysiwyg-hover' ||
+        el.id === 'html-wysiwyg-selection' ||
+        el.id === 'html-wysiwyg-delete' ||
+        el.id === 'html-wysiwyg-toolbar'
+      ) {
         return;
       }
       const elLocked =
@@ -246,12 +291,17 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     if (activeBlock) commitEdit();
     activeBlock = block;
     activeBlockId = elementToBlockId.get(block) ?? null;
-    snapshotTexts = collectBlockTexts(block).map((t) => t.data);
+    pendingNewTag = null;
+    snapshotTextNodes = collectBlockTexts(block);
+    snapshotTexts = snapshotTextNodes.map((t) => t.data);
     snapshotHTML = block.innerHTML;
     block.setAttribute('contenteditable', 'true');
     block.setAttribute('spellcheck', 'true');
     block.focus({ preventScroll: true });
     placeCaretAtEnd(block);
+    if (activeBlockId !== null) {
+      notifyState({ kind: 'editing', block, blockId: activeBlockId });
+    }
     return true;
   }
 
@@ -259,25 +309,81 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     if (!activeBlock || !offsetMap) return;
     const block = activeBlock;
     const blockId = activeBlockId;
+    const snapshotNodes = snapshotTextNodes;
+    const newTag = pendingNewTag;
     activeBlock = null;
     activeBlockId = null;
+    pendingNewTag = null;
     block.removeAttribute('contenteditable');
     block.removeAttribute('spellcheck');
-    if (blockId === null) return;
-    const currentTexts = collectBlockTexts(block);
-    const ids = blockIdToTextNodeIds.get(blockId) ?? [];
-    if (currentTexts.length !== snapshotTexts.length || ids.length !== snapshotTexts.length) {
-      block.innerHTML = snapshotHTML;
-      opts.postToParent({ type: 'editCancel', blockId });
+    if (blockId === null) {
+      notifyState({ kind: 'idle' });
       return;
     }
-    const after = currentTexts.map((t) => t.data);
-    const edits = computeEdits(ids, snapshotTexts, after);
-    if (edits.length === 0) return;
+    const currentTexts = collectBlockTexts(block);
+    const ids = blockIdToTextNodeIds.get(blockId) ?? [];
+    const sameNodes =
+      currentTexts.length === snapshotNodes.length &&
+      currentTexts.every((n, i) => n === snapshotNodes[i]);
+    const innerHtmlChanged = block.innerHTML !== snapshotHTML;
+
+    if (sameNodes && ids.length === snapshotNodes.length) {
+      // Text-only edit — use the byte-perfect text-node pipe.
+      const after = currentTexts.map((t) => t.data);
+      const edits = computeEdits(ids, snapshotTexts, after);
+      if (edits.length > 0) {
+        opts.postToParent({
+          type: 'editCommit',
+          documentVersion: offsetMap.documentVersion,
+          edits,
+        });
+        // If the user also requested a tag change, send it as a follow-up.
+        // The host applies the editCommit first; documentWatcher then ships a
+        // fresh editAck with the new offset map, which the iframe replays
+        // before sending the editBlockTag below.
+        if (newTag) queueTagAfterAck(blockId, newTag);
+      } else if (newTag) {
+        // Tag-only change, byte-perfect inner content.
+        opts.postToParent({
+          type: 'editBlockTag',
+          documentVersion: offsetMap.documentVersion,
+          blockId,
+          newTagName: newTag,
+        });
+      }
+      notifyState({ kind: 'idle' });
+      return;
+    }
+
+    // Structural change — combine inner-html replace with optional tag rename.
+    if (!innerHtmlChanged && !newTag) {
+      notifyState({ kind: 'idle' });
+      return;
+    }
     opts.postToParent({
-      type: 'editCommit',
+      type: 'editBlockHtml',
       documentVersion: offsetMap.documentVersion,
-      edits,
+      blockId,
+      newInnerHtml: block.innerHTML,
+      newTagName: newTag ?? undefined,
+    });
+    notifyState({ kind: 'idle' });
+  }
+
+  /** Queue a tag rename to fire after the next editAck arrives. */
+  let queuedTag: { blockId: number; newTagName: string } | null = null;
+  function queueTagAfterAck(blockId: number, newTagName: string): void {
+    queuedTag = { blockId, newTagName };
+  }
+  function flushQueuedTag(): void {
+    if (!queuedTag || !offsetMap) return;
+    const q = queuedTag;
+    queuedTag = null;
+    opts.postToParent({
+      type: 'editBlockTag',
+      documentVersion: offsetMap.documentVersion,
+      blockId: q.blockId,
+      newTagName: q.newTagName,
     });
   }
 
@@ -293,6 +399,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     if (blockId !== null) {
       opts.postToParent({ type: 'editCancel', blockId });
     }
+    notifyState({ kind: 'idle' });
   }
 
   function requestSave(): void {
@@ -326,6 +433,9 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   function applyOffsetMap(map: OffsetMap): void {
     offsetMap = map;
     rebuild();
+    // If we deferred a tag rename behind a text commit, fire it now that the
+    // host's response has aligned us to the post-commit version.
+    if (queuedTag) flushQueuedTag();
   }
 
   function applyFileMeta(meta: FileMeta): void {
@@ -367,7 +477,48 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       if (blockId !== null) {
         opts.postToParent({ type: 'editCancel', blockId });
       }
+      notifyState({ kind: 'idle' });
     }
+  }
+
+  function onEditStateChange(listener: (state: EditState) => void): () => void {
+    stateListeners.push(listener);
+    return () => {
+      const i = stateListeners.indexOf(listener);
+      if (i >= 0) stateListeners.splice(i, 1);
+    };
+  }
+
+  function blockIdFor(el: HTMLElement): number | null {
+    return elementToBlockId.get(el) ?? null;
+  }
+
+  function sendBlockHtmlCommit(blockId: number, newInnerHtml: string): void {
+    if (!offsetMap) return;
+    opts.postToParent({
+      type: 'editBlockHtml',
+      documentVersion: offsetMap.documentVersion,
+      blockId,
+      newInnerHtml,
+    });
+  }
+
+  function sendBlockTagCommit(blockId: number, newTagName: string): void {
+    if (!offsetMap) return;
+    opts.postToParent({
+      type: 'editBlockTag',
+      documentVersion: offsetMap.documentVersion,
+      blockId,
+      newTagName,
+    });
+  }
+
+  function setPendingTag(tag: string | null): void {
+    pendingNewTag = tag;
+  }
+
+  function pendingTag(): string | null {
+    return pendingNewTag;
   }
 
   if (offsetMap) rebuild();
@@ -389,6 +540,12 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     isInsideActive,
     orderedBlocks,
     onStale,
+    onEditStateChange,
+    blockIdFor,
+    sendBlockHtmlCommit,
+    sendBlockTagCommit,
+    setPendingTag,
+    pendingTag,
   };
 }
 

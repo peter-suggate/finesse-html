@@ -136,6 +136,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     }
     const target = e.target as Element | null;
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
+    if (target && isInOverlayUi(target)) return;
     showHover(pickHoverTarget(target));
   });
 
@@ -175,6 +176,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     if (session.isLocked()) return;
     const target = e.target as Element | null;
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
+    if (target && isInOverlayUi(target)) return;
     if (session.hasActiveBlock()) {
       if (!session.isInsideActive(target)) {
         session.commitEdit();
@@ -302,6 +304,9 @@ export function setupOverlay(opts: OverlayOpts): void {
       setTimeout(() => {
         const active = document.activeElement as HTMLElement | null;
         if (active && session.isInsideActive(active)) return;
+        // Focus moved into our own UI (toolbar select, link popover input).
+        // Treat the editable block as still active.
+        if (active && isInOverlayUi(active)) return;
         session.commitEdit();
         showSelection(null);
       }, 0);
@@ -323,6 +328,20 @@ export function setupOverlay(opts: OverlayOpts): void {
   };
   window.addEventListener('resize', reposition);
   window.addEventListener('scroll', reposition, true);
+}
+
+/**
+ * Click/move events that originate inside our own UI (toolbar, link popover,
+ * delete button, etc.) should never be treated as canvas interactions.
+ * Detected by id prefix `html-wysiwyg-` so new UI pieces are auto-excluded.
+ */
+function isInOverlayUi(target: Element): boolean {
+  let cur: Element | null = target;
+  while (cur && cur !== document.body) {
+    if (cur instanceof HTMLElement && cur.id && cur.id.startsWith('html-wysiwyg-')) return true;
+    cur = cur.parentElement;
+  }
+  return false;
 }
 
 function createDeleteButton(): HTMLButtonElement {

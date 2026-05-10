@@ -1,6 +1,8 @@
 import type { FileMeta, HostMessage, IframeMessage, OffsetMap } from '../shared/protocol';
 import { setupEditSession, type EditSession } from './editSession';
 import { setupOverlay } from './overlay';
+import { setupFormatToolbar } from './toolbar';
+import { makeDefaultActionHandler, makeDefaultRefreshHandler } from './toolbar/wiring';
 
 interface InitData {
   offsetMap: OffsetMap | null;
@@ -38,6 +40,11 @@ function start(): void {
     onError: reportError,
   });
   setupOverlay({ session });
+  setupFormatToolbar({
+    session,
+    onAction: makeDefaultActionHandler({ session }),
+    onRefresh: makeDefaultRefreshHandler({ session }),
+  });
   setupReloadSocket(init.fileMeta.path);
   setupHostMessageListener(session);
   setupGlobalErrorHandlers();
