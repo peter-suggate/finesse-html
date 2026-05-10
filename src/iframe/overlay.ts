@@ -25,20 +25,85 @@ const SELECTION_STYLE: Partial<CSSStyleDeclaration> = {
   display: 'none',
 };
 
+const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
+  position: 'fixed',
+  width: '16px',
+  height: '16px',
+  lineHeight: '14px',
+  textAlign: 'center',
+  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontSize: '13px',
+  fontWeight: '300',
+  color: '#1e6fd9',
+  background: 'transparent',
+  border: 'none',
+  borderRadius: '0',
+  cursor: 'pointer',
+  padding: '0',
+  zIndex: '2147483642',
+  display: 'none',
+  opacity: '0.55',
+  userSelect: 'none',
+  transition: 'opacity 100ms ease-out, color 100ms ease-out',
+};
+
 export function setupOverlay(opts: OverlayOpts): void {
   const { session } = opts;
   const hover = createOverlay(HOVER_STYLE, 'html-wysiwyg-hover');
   const selection = createOverlay(SELECTION_STYLE, 'html-wysiwyg-selection');
+  const deleteBtn = createDeleteButton();
   document.body.appendChild(hover);
   document.body.appendChild(selection);
+  document.body.appendChild(deleteBtn);
+
+  let hoveredEl: HTMLElement | null = null;
+  let focusedEl: HTMLElement | null = null;
 
   function rectOf(el: HTMLElement): DOMRect {
     return el.getBoundingClientRect();
   }
 
+  function deleteTargetEl(): HTMLElement | null {
+    return hoveredEl ?? focusedEl;
+  }
+
+  function refreshDeleteButton(): void {
+    if (session.hasActiveBlock() || session.isLocked()) {
+      deleteBtn.style.display = 'none';
+      return;
+    }
+    const el = deleteTargetEl();
+    if (!el) {
+      deleteBtn.style.display = 'none';
+      return;
+    }
+    const r = rectOf(el);
+    deleteBtn.style.display = 'block';
+    deleteBtn.style.left = `${Math.max(0, r.right - 18)}px`;
+    deleteBtn.style.top = `${Math.max(0, r.top + 2)}px`;
+  }
+
+  function setHoveredEl(el: HTMLElement | null): void {
+    hoveredEl = el;
+    refreshDeleteButton();
+  }
+
+  function setFocusedEl(el: HTMLElement | null): void {
+    focusedEl = el;
+    refreshDeleteButton();
+  }
+
+  /** Pick the visual hover target — prefers an editable block (so click-to-edit
+   *  is the obvious affordance), falls back to any selectable ancestor. */
+  function pickHoverTarget(target: Element | null): HTMLElement | null {
+    if (!target) return null;
+    return session.findEditableBlock(target) ?? session.findSelectableElement(target);
+  }
+
   function showHover(el: HTMLElement | null): void {
     if (!el || session.hasActiveBlock()) {
       hover.style.display = 'none';
+      setHoveredEl(null);
       return;
     }
     const r = rectOf(el);
@@ -47,6 +112,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     hover.style.top = `${r.top}px`;
     hover.style.width = `${r.width}px`;
     hover.style.height = `${r.height}px`;
+    setHoveredEl(el);
   }
 
   function showSelection(el: HTMLElement | null): void {
@@ -65,19 +131,50 @@ export function setupOverlay(opts: OverlayOpts): void {
   document.addEventListener('mousemove', (e) => {
     if (session.isLocked() || session.hasActiveBlock()) {
       hover.style.display = 'none';
+      setHoveredEl(null);
       return;
     }
-    const block = session.findEditableBlock(e.target as Element | null);
-    showHover(block);
+    const target = e.target as Element | null;
+    if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
+    showHover(pickHoverTarget(target));
   });
 
   document.addEventListener('mouseleave', () => {
     hover.style.display = 'none';
+    setHoveredEl(null);
+  });
+
+  deleteBtn.addEventListener('mouseenter', () => {
+    deleteBtn.style.opacity = '1';
+    deleteBtn.style.color = '#d14545';
+  });
+  deleteBtn.addEventListener('mouseleave', () => {
+    deleteBtn.style.opacity = '0.55';
+    deleteBtn.style.color = '#1e6fd9';
+  });
+
+  deleteBtn.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  deleteBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (session.isLocked() || session.hasActiveBlock()) return;
+    const target = deleteTargetEl();
+    if (!target) return;
+    setHoveredEl(null);
+    setFocusedEl(null);
+    hover.style.display = 'none';
+    showSelection(null);
+    session.removeElement(target);
   });
 
   document.addEventListener('click', (e) => {
     if (session.isLocked()) return;
     const target = e.target as Element | null;
+    if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (session.hasActiveBlock()) {
       if (!session.isInsideActive(target)) {
         session.commitEdit();
@@ -85,18 +182,53 @@ export function setupOverlay(opts: OverlayOpts): void {
       }
       return;
     }
-    const block = session.findEditableBlock(target);
-    if (!block) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (session.beginEdit(block)) {
-      showSelection(block);
+    // Alt-click: bypass edit-mode logic, select the innermost element directly.
+    if (e.altKey) {
+      const exact = session.findSelectableElement(target);
+      if (!exact) return;
+      e.preventDefault();
+      e.stopPropagation();
       hover.style.display = 'none';
+      setHoveredEl(null);
+      session.selectElement(exact);
+      return;
+    }
+    // Default click: prefer text-edit on an editable block, else select for delete.
+    const block = session.findEditableBlock(target);
+    if (block) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (session.beginEdit(block)) {
+        showSelection(block);
+        hover.style.display = 'none';
+        setHoveredEl(null);
+        setFocusedEl(null);
+      }
+      return;
+    }
+    const selectable = session.findSelectableElement(target);
+    if (selectable) {
+      e.preventDefault();
+      e.stopPropagation();
+      hover.style.display = 'none';
+      setHoveredEl(null);
+      session.selectElement(selectable);
     }
   });
 
   document.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl+S: commit any active edit, then ask host to save.
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      if (session.hasActiveBlock()) {
+        session.commitEdit();
+        showSelection(null);
+      }
+      session.requestSave();
+      return;
+    }
     if (session.hasActiveBlock()) {
+      // In edit mode: never intercept Delete/Backspace — let contentEditable handle them.
       if (e.key === 'Escape') {
         e.preventDefault();
         const block = session.activeBlockElement();
@@ -122,24 +254,43 @@ export function setupOverlay(opts: OverlayOpts): void {
         if (session.beginEdit(block)) {
           showSelection(block);
           hover.style.display = 'none';
+          setHoveredEl(null);
+          setFocusedEl(null);
         }
       }
+      return;
+    }
+    // Not editing: Delete/Backspace on a focused selectable element removes it.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const focused = document.activeElement as HTMLElement | null;
+      if (!focused) return;
+      // Only when the focused element itself is a selectable target — never when
+      // focus is inside something else that happens to live under one.
+      if (session.findSelectableElement(focused) !== focused) return;
+      e.preventDefault();
+      setHoveredEl(null);
+      setFocusedEl(null);
+      hover.style.display = 'none';
+      showSelection(null);
+      session.removeElement(focused);
     }
   });
 
   document.addEventListener('focusin', (e) => {
     if (session.hasActiveBlock()) return;
     const target = e.target as Element | null;
-    if (!target) return;
-    const block = session.findEditableBlock(target);
-    if (block && block === target) {
-      showSelection(block);
-      hover.style.display = 'none';
-    }
+    if (!(target instanceof HTMLElement)) return;
+    if (session.findSelectableElement(target) !== target) return;
+    showSelection(target);
+    hover.style.display = 'none';
+    setFocusedEl(target);
   });
 
   document.addEventListener('focusout', () => {
-    if (!session.hasActiveBlock()) showSelection(null);
+    if (!session.hasActiveBlock()) {
+      showSelection(null);
+      setFocusedEl(null);
+    }
   });
 
   document.addEventListener(
@@ -148,8 +299,6 @@ export function setupOverlay(opts: OverlayOpts): void {
       const target = e.target as HTMLElement | null;
       if (!target || target.getAttribute('contenteditable') !== 'true') return;
       if (!session.hasActiveBlock()) return;
-      // The user may be tabbing within the block; defer commit slightly to allow
-      // refocus checks to land first.
       setTimeout(() => {
         const active = document.activeElement as HTMLElement | null;
         if (active && session.isInsideActive(active)) return;
@@ -169,9 +318,22 @@ export function setupOverlay(opts: OverlayOpts): void {
   const reposition = (): void => {
     hover.style.display = 'none';
     showSelection(null);
+    setHoveredEl(null);
+    setFocusedEl(null);
   };
   window.addEventListener('resize', reposition);
   window.addEventListener('scroll', reposition, true);
+}
+
+function createDeleteButton(): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.id = 'html-wysiwyg-delete';
+  btn.type = 'button';
+  btn.textContent = '×';
+  btn.title = 'Remove element (Delete)';
+  btn.setAttribute('aria-label', 'Remove element');
+  Object.assign(btn.style, DELETE_BUTTON_STYLE);
+  return btn;
 }
 
 function createOverlay(style: Partial<CSSStyleDeclaration>, id: string): HTMLDivElement {
@@ -181,4 +343,3 @@ function createOverlay(style: Partial<CSSStyleDeclaration>, id: string): HTMLDiv
   el.setAttribute('aria-hidden', 'true');
   return el;
 }
-

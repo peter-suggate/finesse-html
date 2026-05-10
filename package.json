@@ -94,8 +94,10 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.iframe.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.iframe.json --noEmit && tsc -p tsconfig.webview.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "package": "vsce package --no-dependencies --out vscode-html-wysiwyg.vsix",
     "clean": "rimraf dist *.vsix"
   },
@@ -115,6 +117,7 @@
     "prettier": "^3.2.5",
     "rimraf": "^5.0.5",
     "typescript": "^5.4.5",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.1.5"
   }
 }

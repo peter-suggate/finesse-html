@@ -5,6 +5,50 @@ export interface InjectionPayload {
   fileMeta: FileMeta;
 }
 
+/**
+ * Splice `data-html-wysiwyg-id="N"` into each selectable element's opening tag.
+ * The iframe uses these as stable handles that survive implicit DOM insertions
+ * (e.g. browser-inserted `<tbody>`) and script mutations.
+ *
+ * Right-to-left? No — we precompute insertion points then build the output in
+ * one ascending pass, so the original offsets stay valid.
+ */
+export function injectElementIds(html: string, offsetMap: OffsetMap | null): string {
+  if (!offsetMap || offsetMap.elements.length === 0) return html;
+  type Insertion = { pos: number; text: string };
+  const inserts: Insertion[] = [];
+  for (const el of offsetMap.elements) {
+    if (el.endOffset <= el.startOffset) continue;
+    const insertPos = el.startOffset + 1 + el.tagName.length;
+    if (insertPos >= html.length) continue;
+    const next = html[insertPos];
+    // Sanity: must be at the boundary right after the source tag name.
+    if (
+      next !== ' ' &&
+      next !== '\t' &&
+      next !== '\n' &&
+      next !== '\r' &&
+      next !== '/' &&
+      next !== '>'
+    ) {
+      continue;
+    }
+    inserts.push({ pos: insertPos, text: ` data-html-wysiwyg-id="${el.elementId}"` });
+  }
+  if (inserts.length === 0) return html;
+  inserts.sort((a, b) => a.pos - b.pos);
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (const ins of inserts) {
+    if (ins.pos < cursor) continue;
+    pieces.push(html.slice(cursor, ins.pos));
+    pieces.push(ins.text);
+    cursor = ins.pos;
+  }
+  pieces.push(html.slice(cursor));
+  return pieces.join('');
+}
+
 const RUNTIME_SCRIPT_TAG = '<script src="/__edit/runtime.js"></script>';
 
 function jsonForScript(value: unknown): string {

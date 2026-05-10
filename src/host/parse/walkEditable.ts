@@ -32,6 +32,8 @@ function isText(node: Parse5Node): boolean {
   return node.nodeName === '#text';
 }
 
+const STRUCTURAL_ROOTS: ReadonlySet<string> = new Set(['html', 'body']);
+
 export interface WalkOptions {
   /** When true, ignore the templated-file file-level lock (the editAnyway override). */
   bypassFileTemplateLock?: boolean;
@@ -45,19 +47,43 @@ export function walkEditable(
   options: WalkOptions = {},
 ): OffsetMap {
   const doc = parse(html, { sourceCodeLocationInfo: true }) as unknown as Parse5Node;
+  const elements: OffsetMap['elements'] = [];
   const blocks: OffsetMap['blocks'] = [];
   const textNodes: OffsetMap['textNodes'] = [];
+  const elementIdByNode = new Map<Parse5Node, number>();
   const blockIdByElement = new Map<Parse5Node, number>();
+  let nextElementId = 0;
   let nextBlockId = 0;
   let nextNodeId = 0;
   let htmlElementOverride = false;
+
+  function ensureElementId(el: Parse5Node): number | null {
+    const existing = elementIdByNode.get(el);
+    if (existing !== undefined) return existing;
+    const loc = el.sourceCodeLocation;
+    if (!loc) return null;
+    const id = nextElementId++;
+    elementIdByNode.set(el, id);
+    elements.push({
+      elementId: id,
+      tagName: el.tagName ?? '',
+      startOffset: loc.startOffset,
+      endOffset: loc.endOffset,
+    });
+    return id;
+  }
 
   function ensureBlockId(el: Parse5Node): number {
     const existing = blockIdByElement.get(el);
     if (existing !== undefined) return existing;
     const id = nextBlockId++;
     blockIdByElement.set(el, id);
-    blocks.push({ blockId: id, tagName: el.tagName ?? '' });
+    const elementId = ensureElementId(el);
+    blocks.push({
+      blockId: id,
+      elementId: elementId ?? -1,
+      tagName: el.tagName ?? '',
+    });
     return id;
   }
 
@@ -76,8 +102,14 @@ export function walkEditable(
         htmlElementOverride = true;
       }
       if (SKIP_SUBTREE_TAGS.has(tag)) return;
-      if (NON_EDITABLE_PARENT_TAGS.has(tag)) return;
+      // Emit every visited element except structural roots (html/body) as selectable.
+      if (!STRUCTURAL_ROOTS.has(tag)) {
+        ensureElementId(node);
+      }
       const elLocked = locked || hasNoEditAttr(node.attrs);
+      // NON_EDITABLE_PARENT_TAGS are still selectable as elements (so user can delete a
+      // <pre> / <code> wholesale), but we don't recurse for text-editing purposes.
+      if (NON_EDITABLE_PARENT_TAGS.has(tag)) return;
       const nextBlocks = BLOCK_TAGS.has(tag) ? [...blockAncestors, node] : blockAncestors;
       for (const child of node.childNodes ?? []) {
         visit(child, nextBlocks, elLocked);
@@ -113,6 +145,7 @@ export function walkEditable(
   return {
     type: 'offsetMap',
     documentVersion,
+    elements,
     blocks,
     textNodes,
   };

@@ -55,6 +55,15 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
     }),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      const panels = state?.panels;
+      if (!panels) return;
+      for (const panel of panels.values()) {
+        if (panel.documentUri.toString() === doc.uri.toString()) {
+          panel.onDocumentSaved(doc);
+        }
+      }
+    }),
     vscode.workspace.onDidOpenTextDocument((doc) => {
       if (!state?.config.openOnHtmlOpen) return;
       if (doc.languageId !== 'html') return;

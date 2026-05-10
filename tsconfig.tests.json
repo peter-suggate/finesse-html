@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/shared/**/*",
+    "src/host/parse/**/*",
+    "src/host/server/inject.ts",
+    "src/iframe/diff.ts",
+    "tests/**/*"
+  ]
+}

@@ -49,9 +49,17 @@ export interface EditSession {
   applyFileMeta(meta: FileMeta): void;
   /** Return the editable block container ancestor, or null. */
   findEditableBlock(target: Element | null): HTMLElement | null;
+  /** Return the innermost ancestor that is a selectable element, or null. */
+  findSelectableElement(target: Element | null): HTMLElement | null;
   beginEdit(block: HTMLElement): boolean;
   commitEdit(): void;
   cancelEdit(): void;
+  /** Remove any selectable element from source via host. */
+  removeElement(el: HTMLElement): boolean;
+  /** Make `el` programmatically focusable and focus it (for non-edit selection). */
+  selectElement(el: HTMLElement): void;
+  /** Ask the host to save the underlying document. */
+  requestSave(): void;
   isLocked(): boolean;
   hasActiveBlock(): boolean;
   activeBlockElement(): HTMLElement | null;
@@ -75,6 +83,8 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   let elementToBlockId = new Map<HTMLElement, number>();
   let blockIdToElement = new Map<number, HTMLElement>();
   let blockIdToTextNodeIds = new Map<number, number[]>();
+  let elementToElementId = new Map<HTMLElement, number>();
+  let elementIdToElement = new Map<number, HTMLElement>();
 
   let activeBlock: HTMLElement | null = null;
   let activeBlockId: number | null = null;
@@ -82,7 +92,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   let snapshotHTML = '';
 
   function rebuild(): void {
-    // Restore prior tabindex/role attrs we may have set; we apply fresh below.
+    // Restore prior tabindex/role attrs we may have set on editable blocks.
     for (const el of elementToBlockId.keys()) {
       if (el.dataset.htmlWysiwygApplied === 'true') {
         el.removeAttribute('tabindex');
@@ -94,7 +104,24 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     elementToBlockId = new Map();
     blockIdToElement = new Map();
     blockIdToTextNodeIds = new Map();
+    elementToElementId = new Map();
+    elementIdToElement = new Map();
     if (!offsetMap) return;
+
+    // Element id mapping comes from data-html-wysiwyg-id attributes the host
+    // splices in at serve time. Robust against implicit DOM insertions like
+    // browser-added <tbody>.
+    const tagged = document.body?.querySelectorAll('[data-html-wysiwyg-id]') ?? [];
+    for (const el of Array.from(tagged)) {
+      if (!(el instanceof HTMLElement)) continue;
+      const idStr = el.getAttribute('data-html-wysiwyg-id');
+      if (!idStr) continue;
+      const id = Number.parseInt(idStr, 10);
+      if (Number.isNaN(id)) continue;
+      elementIdToElement.set(id, el);
+      elementToElementId.set(el, id);
+    }
+
     const blockEls: HTMLElement[] = [];
     const textNodes: Text[] = [];
     walk(document.body, [], false, blockEls, textNodes);
@@ -135,9 +162,12 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       const el = node as HTMLElement;
       const tag = el.tagName.toLowerCase();
       if (SKIP_SUBTREE_TAGS.has(tag)) return;
-      if (NON_EDITABLE_PARENT_TAGS.has(tag)) return;
+      if (el.id === 'html-wysiwyg-hover' || el.id === 'html-wysiwyg-selection' || el.id === 'html-wysiwyg-delete') {
+        return;
+      }
       const elLocked =
         locked || el.hasAttribute('data-no-edit') || el.getAttribute('contenteditable') === 'false';
+      if (NON_EDITABLE_PARENT_TAGS.has(tag)) return;
       const nextBlocks = BLOCK_TAGS.has(tag) ? [...blockAncestors, el] : blockAncestors;
       for (const child of Array.from(el.childNodes)) {
         walk(child, nextBlocks, elLocked, blockEls, textNodes);
@@ -168,6 +198,19 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       if (cur instanceof HTMLElement) {
         if (cur.hasAttribute('data-no-edit')) return null;
         if (elementToBlockId.has(cur)) return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function findSelectableElement(target: Element | null): HTMLElement | null {
+    if (!target || isLocked()) return null;
+    let cur: Element | null = target;
+    while (cur && cur !== document.body) {
+      if (cur instanceof HTMLElement) {
+        if (cur.hasAttribute('data-no-edit')) return null;
+        if (elementToElementId.has(cur)) return cur;
       }
       cur = cur.parentElement;
     }
@@ -252,6 +295,34 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     }
   }
 
+  function requestSave(): void {
+    opts.postToParent({ type: 'saveRequest' });
+  }
+
+  function selectElement(el: HTMLElement): void {
+    if (isLocked()) return;
+    if (!el.hasAttribute('tabindex')) {
+      el.setAttribute('tabindex', '-1');
+      el.dataset.htmlWysiwygSelTab = 'true';
+    }
+    el.focus({ preventScroll: true });
+  }
+
+  function removeElement(el: HTMLElement): boolean {
+    if (isLocked() || !offsetMap) return false;
+    const elementId = elementToElementId.get(el);
+    if (elementId === undefined) return false;
+    if (activeBlock) cancelEdit();
+    // Optimistically remove from DOM; host responds with editAck + fresh offset map.
+    el.remove();
+    opts.postToParent({
+      type: 'editRemove',
+      documentVersion: offsetMap.documentVersion,
+      elementIds: [elementId],
+    });
+    return true;
+  }
+
   function applyOffsetMap(map: OffsetMap): void {
     offsetMap = map;
     rebuild();
@@ -305,9 +376,13 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     applyOffsetMap,
     applyFileMeta,
     findEditableBlock,
+    findSelectableElement,
     beginEdit,
     commitEdit,
     cancelEdit,
+    removeElement,
+    selectElement,
+    requestSave,
     isLocked,
     hasActiveBlock,
     activeBlockElement,

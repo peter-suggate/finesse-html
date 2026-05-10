@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { URL } from 'node:url';
 import type { FileMeta } from '../../shared/protocol';
 import type { PreviewServer, PreviewServerOptions } from './index';
-import { injectInstrumentation } from './inject';
+import { injectElementIds, injectInstrumentation } from './inject';
 import { ReloadSocket } from './reloadSocket';
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -191,7 +191,8 @@ class PreviewServerImpl implements PreviewServer {
       path: relPath,
       isTemplated: this.opts.isTemplated(relPath),
     };
-    const html = injectInstrumentation(source, { offsetMap, fileMeta });
+    const withIds = injectElementIds(source, offsetMap);
+    const html = injectInstrumentation(withIds, { offsetMap, fileMeta });
     const etag = `W/"html-${offsetMap?.documentVersion ?? 0}-${html.length}"`;
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { ETag: etag });

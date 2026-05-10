@@ -1,8 +1,10 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type {
+  DocumentState,
   EditCommit,
   EditCancel,
+  EditRemove,
   FileMeta,
   HostMessage,
   IframeMessage,
@@ -10,7 +12,7 @@ import type {
   Ready,
   RuntimeError,
 } from '../shared/protocol';
-import { applyEditCommit } from './applyEdit';
+import { applyEditCommit, applyRemoveCommit } from './applyEdit';
 import type { ResolvedConfig } from './config';
 import { detectTemplate, hasEditAnywayOverride, walkEditable } from './parse';
 
@@ -26,6 +28,7 @@ export interface PreviewPanel {
   dispose(): void;
   reveal(): void;
   onDocumentChanged(doc: vscode.TextDocument, kind: 'self' | 'external'): void;
+  onDocumentSaved(doc: vscode.TextDocument): void;
 }
 
 export interface PanelDeps {
@@ -38,7 +41,8 @@ export interface PanelDeps {
 
 interface WebviewActionMessage {
   type: '__webview_action';
-  action: 'editAnyway';
+  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave';
+  value?: boolean;
 }
 
 type IncomingMessage = IframeMessage | WebviewActionMessage;
@@ -64,6 +68,7 @@ export function createPreviewPanel(
   let currentOffsetMap: OffsetMap | null = null;
   let isTemplated = false;
   let expectedSelfEditVersion: number | null = null;
+  let autoSave = false;
 
   function reparse(text: string, version: number): void {
     const patterns = deps.getConfig().templatePatterns;
@@ -94,6 +99,51 @@ export function createPreviewPanel(
     void handleMessage(raw);
   });
 
+  function postDocumentState(): void {
+    const msg: DocumentState = {
+      type: 'documentState',
+      isDirty: document.isDirty,
+      autoSave,
+    };
+    panel.webview.postMessage(msg);
+  }
+
+  async function saveDocument(): Promise<void> {
+    if (!document.isDirty) return;
+    try {
+      await document.save();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`HTML WYSIWYG save failed: ${message}`);
+    }
+  }
+
+  async function discardChanges(): Promise<void> {
+    if (!document.isDirty) return;
+    const choice = await vscode.window.showWarningMessage(
+      `Discard changes to ${path.basename(document.uri.fsPath)}?`,
+      { modal: true },
+      'Discard',
+    );
+    if (choice !== 'Discard') return;
+    try {
+      // Some VS Code / Cursor builds accept a URI arg; try that first.
+      await vscode.commands.executeCommand('workbench.action.files.revert', document.uri);
+    } catch {
+      try {
+        // Fallback: focus the document briefly so the active-editor revert finds it.
+        await vscode.window.showTextDocument(document, {
+          preserveFocus: true,
+          preview: false,
+        });
+        await vscode.commands.executeCommand('workbench.action.files.revert');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        void vscode.window.showErrorMessage(`HTML WYSIWYG discard failed: ${message}`);
+      }
+    }
+  }
+
   panel.onDidDispose(() => {
     deps.onDispose();
   });
@@ -105,6 +155,14 @@ export function createPreviewPanel(
       case '__webview_action':
         if (msg.action === 'editAnyway') {
           await vscode.commands.executeCommand('htmlWysiwyg.editAnyway');
+        } else if (msg.action === 'save') {
+          await saveDocument();
+        } else if (msg.action === 'discard') {
+          await discardChanges();
+        } else if (msg.action === 'setAutoSave') {
+          autoSave = !!msg.value;
+          postDocumentState();
+          if (autoSave) await saveDocument();
         }
         return;
       case 'ready':
@@ -113,8 +171,14 @@ export function createPreviewPanel(
       case 'editCommit':
         await handleEditCommit(msg);
         return;
+      case 'editRemove':
+        await handleEditRemove(msg);
+        return;
       case 'editCancel':
         handleEditCancel(msg);
+        return;
+      case 'saveRequest':
+        await saveDocument();
         return;
       case 'runtimeError':
         handleRuntimeError(msg);
@@ -129,6 +193,7 @@ export function createPreviewPanel(
       path: relativePath,
       isTemplated,
     } satisfies FileMeta);
+    postDocumentState();
   }
 
   async function handleEditCommit(msg: EditCommit): Promise<void> {
@@ -149,11 +214,42 @@ export function createPreviewPanel(
           expectedVersion: result.expected,
           actualVersion: result.actual,
         });
+      } else if (autoSave) {
+        await saveDocument();
       }
     } catch (err) {
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`HTML WYSIWYG edit failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  async function handleEditRemove(msg: EditRemove): Promise<void> {
+    try {
+      const result = await applyRemoveCommit({
+        document,
+        currentVersion,
+        currentOffsetMap,
+        commit: msg,
+        beforeApply: (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+      });
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        panel.webview.postMessage({
+          type: 'staleCommit',
+          expectedVersion: result.expected,
+          actualVersion: result.actual,
+        });
+      } else if (autoSave) {
+        await saveDocument();
+      }
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`HTML WYSIWYG remove failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }
@@ -220,6 +316,10 @@ export function createPreviewPanel(
         panel.webview.postMessage(fm);
         panel.webview.postMessage({ type: 'reload', reason: 'external-edit' });
       }
+      postDocumentState();
+    },
+    onDocumentSaved(_doc) {
+      postDocumentState();
     },
   };
 }
@@ -257,8 +357,16 @@ function buildWebviewHtml(
     <style>
       :root { color-scheme: dark light; }
       body { margin: 0; padding: 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); height: 100vh; display: flex; flex-direction: column; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); }
-      #status { display: flex; gap: 12px; padding: 4px 12px; font-size: 11px; background: var(--vscode-statusBar-background); color: var(--vscode-statusBar-foreground); border-bottom: 1px solid var(--vscode-panel-border); }
+      #status { display: flex; gap: 12px; align-items: center; padding: 4px 12px; font-size: 11px; background: var(--vscode-statusBar-background); color: var(--vscode-statusBar-foreground); border-bottom: 1px solid var(--vscode-panel-border); }
       #status .muted { opacity: 0.7; }
+      #status .grow { flex: 1; }
+      #status .dirty-dot { color: #e2a04a; font-size: 13px; line-height: 1; opacity: 0; transition: opacity 100ms ease-out; }
+      #status .dirty-dot.is-dirty { opacity: 1; }
+      #status button.tool { font: inherit; font-size: 11px; background: transparent; color: inherit; border: 1px solid var(--vscode-panel-border); border-radius: 2px; padding: 1px 8px; cursor: pointer; opacity: 0.85; }
+      #status button.tool:hover:not(:disabled) { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06)); }
+      #status button.tool:disabled { opacity: 0.4; cursor: default; }
+      #status label.toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; opacity: 0.85; }
+      #status label.toggle input { margin: 0; }
       #banners { display: flex; flex-direction: column; }
       .banner { padding: 8px 12px; font-size: 13px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--vscode-panel-border); }
       .banner-warn { background: var(--vscode-inputValidation-warningBackground); color: var(--vscode-inputValidation-warningForeground); }
@@ -274,10 +382,18 @@ function buildWebviewHtml(
   </head>
   <body>
     <div id="status" role="status">
+      <span id="status-dirty" class="dirty-dot" aria-hidden="true">●</span>
       <span id="status-file" class="muted">no file</span>
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
       <span id="status-locked" class="muted" hidden>editing locked</span>
+      <span class="grow"></span>
+      <label class="toggle" title="Save automatically after each edit">
+        <input id="status-autosave" type="checkbox" />
+        <span>Auto-save</span>
+      </label>
+      <button id="status-discard" class="tool" type="button" title="Discard unsaved changes" disabled>Discard</button>
+      <button id="status-save" class="tool" type="button" title="Save (⌘S)" disabled>Save</button>
     </div>
     <div id="banners" role="region" aria-label="HTML WYSIWYG notifications" aria-live="polite"></div>
     <div id="frame-wrap">

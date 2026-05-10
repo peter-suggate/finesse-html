@@ -5,9 +5,20 @@
 export type OffsetMap = {
   type: "offsetMap";
   documentVersion: number;
+  /** Every selectable/removable element in document order. Includes blocks. */
+  elements: Array<{
+    elementId: number;
+    tagName: string;
+    /** Source offset of the element's opening `<` (inclusive). */
+    startOffset: number;
+    /** Source offset just past the element's closing `>` (exclusive). */
+    endOffset: number;
+  }>;
+  /** Subset of elements that are text-editing block containers. */
   blocks: Array<{
     blockId: number;
-    /** Tag name of the block container, lowercased. Used by overlay UI for ARIA labels. */
+    /** Pointer into `elements`. */
+    elementId: number;
     tagName: string;
   }>;
   textNodes: Array<{
@@ -45,7 +56,21 @@ export type FileMeta = {
   isTemplated: boolean;
 };
 
-export type HostMessage = OffsetMap | Reload | EditAck | StaleCommit | FileMeta;
+export type DocumentState = {
+  type: "documentState";
+  /** Whether the underlying TextDocument has unsaved changes. */
+  isDirty: boolean;
+  /** Whether host-side auto-save-after-commit is currently enabled. */
+  autoSave: boolean;
+};
+
+export type HostMessage =
+  | OffsetMap
+  | Reload
+  | EditAck
+  | StaleCommit
+  | FileMeta
+  | DocumentState;
 
 // ── Iframe → Host ─────────────────────────────────────────────────────────
 
@@ -60,6 +85,13 @@ export type EditCancel = {
   blockId: number;
 };
 
+export type EditRemove = {
+  type: "editRemove";
+  documentVersion: number;
+  /** Element ids to remove from source, in any order. Host splices right-to-left. */
+  elementIds: number[];
+};
+
 export type RuntimeError = {
   type: "runtimeError";
   message: string;
@@ -68,4 +100,13 @@ export type RuntimeError = {
 
 export type Ready = { type: "ready" };
 
-export type IframeMessage = EditCommit | EditCancel | RuntimeError | Ready;
+/** Iframe asks host to save the underlying document (Cmd+S inside the preview). */
+export type SaveRequest = { type: "saveRequest" };
+
+export type IframeMessage =
+  | EditCommit
+  | EditCancel
+  | EditRemove
+  | RuntimeError
+  | Ready
+  | SaveRequest;

@@ -29,7 +29,8 @@ declare const acquireVsCodeApi: () => VsCodeApi;
 
 interface WebviewActionMessage {
   type: '__webview_action';
-  action: 'editAnyway';
+  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave';
+  value?: boolean;
 }
 
 const vscode = acquireVsCodeApi();
@@ -41,12 +42,21 @@ if (banners) initBanners(banners);
 if (!init) {
   showRuntimeErrorBanner('init data missing (window.__HTML_WYSIWYG_INIT__)');
 } else {
-  initStatus({
-    file: init.fileMeta.path,
-    version: 0,
-    port: init.port,
-    locked: init.fileMeta.isTemplated,
-  });
+  initStatus(
+    {
+      file: init.fileMeta.path,
+      version: 0,
+      port: init.port,
+      locked: init.fileMeta.isTemplated,
+      isDirty: false,
+      autoSave: false,
+    },
+    {
+      onSave: requestSave,
+      onDiscard: requestDiscard,
+      onToggleAutoSave: (next) => requestSetAutoSave(next),
+    },
+  );
   if (init.fileMeta.isTemplated) {
     showTemplatedBanner({ onEditAnyway: requestEditAnyway });
   }
@@ -55,6 +65,21 @@ if (!init) {
 
 function requestEditAnyway(): void {
   const msg: WebviewActionMessage = { type: '__webview_action', action: 'editAnyway' };
+  vscode.postMessage(msg);
+}
+
+function requestSave(): void {
+  const msg: WebviewActionMessage = { type: '__webview_action', action: 'save' };
+  vscode.postMessage(msg);
+}
+
+function requestDiscard(): void {
+  const msg: WebviewActionMessage = { type: '__webview_action', action: 'discard' };
+  vscode.postMessage(msg);
+}
+
+function requestSetAutoSave(value: boolean): void {
+  const msg: WebviewActionMessage = { type: '__webview_action', action: 'setAutoSave', value };
   vscode.postMessage(msg);
 }
 
@@ -121,15 +146,34 @@ function bootIframe(init: InitData): void {
         }
         relayToIframe(data);
         break;
+      case 'documentState':
+        updateStatus({ isDirty: data.isDirty, autoSave: data.autoSave });
+        break;
     }
   }
 }
+
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      requestSave();
+    }
+  },
+  true,
+);
 
 function isIframeMessage(data: unknown): data is IframeMessage {
   if (!data || typeof data !== 'object') return false;
   const t = (data as { type?: unknown }).type;
   return (
-    t === 'editCommit' || t === 'editCancel' || t === 'runtimeError' || t === 'ready'
+    t === 'editCommit' ||
+    t === 'editRemove' ||
+    t === 'editCancel' ||
+    t === 'runtimeError' ||
+    t === 'ready' ||
+    t === 'saveRequest'
   );
 }
 
@@ -141,6 +185,7 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'editAck' ||
     t === 'reload' ||
     t === 'staleCommit' ||
-    t === 'fileMeta'
+    t === 'fileMeta' ||
+    t === 'documentState'
   );
 }
