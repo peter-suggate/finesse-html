@@ -197,6 +197,10 @@ export function setupOverlay(opts: OverlayOpts): void {
       session.announceElementSelection(exact);
       return;
     }
+    // Let page controls keep their native behavior in preview mode. Without
+    // this, selecting/editing ancestors prevents summaries from toggling and
+    // anchors/buttons from acting like the rendered page.
+    if (target && isInteractiveClickTarget(target)) return;
     // Default click: prefer text-edit on an editable block, else select for delete.
     const block = session.findEditableBlock(target);
     if (block) {
@@ -374,6 +378,33 @@ function isInOverlayUi(target: Element): boolean {
   let cur: Element | null = target;
   while (cur && cur !== document.body) {
     if (cur instanceof HTMLElement && cur.id && cur.id.startsWith('finesse-')) return true;
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
+function isInteractiveClickTarget(target: Element): boolean {
+  let cur: Element | null = target;
+  while (cur && cur !== document.body) {
+    if (!(cur instanceof HTMLElement)) {
+      cur = cur.parentElement;
+      continue;
+    }
+    const tag = cur.tagName.toLowerCase();
+    if (
+      tag === 'a' ||
+      tag === 'button' ||
+      tag === 'summary' ||
+      tag === 'input' ||
+      tag === 'select' ||
+      tag === 'textarea' ||
+      tag === 'label'
+    ) {
+      return true;
+    }
+    if (cur.hasAttribute('onclick')) return true;
+    const role = cur.getAttribute('role');
+    if (role === 'button' || role === 'link' || role === 'tab' || role === 'menuitem') return true;
     cur = cur.parentElement;
   }
   return false;

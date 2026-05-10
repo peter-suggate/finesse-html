@@ -141,6 +141,51 @@ test('selects an element and emits agent context without running an agent', asyn
   }
 });
 
+test('does not suppress native clicks on interactive preview elements', async ({ page }) => {
+  const harness = await createHarness(
+    page,
+    `<!doctype html>
+<html>
+  <body>
+    <nav>
+      <a id="jump-link" href="#target"><span>Jump</span></a>
+      <button id="phase-button" data-phase="1b"><span>Phase 1B</span></button>
+    </nav>
+    <p id="copy">Editable copy</p>
+    <details id="accordion">
+      <summary><span>Open details</span></summary>
+      <p>Accordion body</p>
+    </details>
+    <div style="height: 1200px"></div>
+    <section id="target">Target</section>
+    <script>
+      document.addEventListener('click', (event) => {
+        const button = event.target.closest('#phase-button');
+        if (button) document.body.dataset.phase = button.dataset.phase;
+      });
+    </script>
+  </body>
+</html>`,
+  );
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#accordion summary span').click();
+    await expect(page.locator('#accordion')).toHaveAttribute('open', '');
+    await expect(page.locator('#accordion summary')).not.toHaveAttribute('contenteditable', 'true');
+
+    await page.locator('#phase-button span').click();
+    await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');
+
+    await page.locator('#jump-link span').click();
+    await page.waitForFunction(() => window.location.hash === '#target');
+    await expect(page.locator('#copy')).not.toHaveAttribute('contenteditable', 'true');
+  } finally {
+    await harness.dispose();
+  }
+});
+
 interface Harness {
   copyPath: string;
   url: string;
@@ -149,11 +194,12 @@ interface Harness {
   dispose(): Promise<void>;
 }
 
-async function createHarness(page: Page): Promise<Harness> {
+async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'finesse-e2e-'));
   const relativePath = 'detailed-example.html';
   const copyPath = path.join(workspaceRoot, relativePath);
-  fs.copyFileSync(sourceFixturePath, copyPath);
+  if (sourceHtml === undefined) fs.copyFileSync(sourceFixturePath, copyPath);
+  else fs.writeFileSync(copyPath, sourceHtml);
 
   let source = fs.readFileSync(copyPath, 'utf-8');
   let version = 1;
