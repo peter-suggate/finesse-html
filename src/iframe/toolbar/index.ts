@@ -9,6 +9,7 @@
  */
 
 import type { EditSession, EditState } from '../editSession';
+import { setupCrumbs, type CrumbsHandle } from './breadcrumbs';
 import { buildToolbar, type ButtonSpec, type ToolbarHandle } from './element';
 import { ICONS } from './icons';
 import { computeToolbarPosition, selectionRect, type Rect } from './positioning';
@@ -113,6 +114,18 @@ export function setupFormatToolbar(opts: SetupToolbarOpts): ToolbarController {
   let activeBlockId: number | null = null;
   let rafScheduled = false;
 
+  const crumbs: CrumbsHandle = setupCrumbs({
+    container: toolbar.crumbs,
+    session: opts.session,
+    onPick: (elementId) => {
+      const target = opts.session.findElementById(elementId);
+      if (!target) return;
+      if (opts.session.hasActiveBlock()) opts.session.commitEdit();
+      opts.session.selectElement(target);
+      opts.session.announceElementSelection(target);
+    },
+  });
+
   function ctx(): ToolbarActionContext | null {
     if (!activeBlock || activeBlockId === null) return null;
     return { block: activeBlock, blockId: activeBlockId, toolbar };
@@ -144,6 +157,9 @@ export function setupFormatToolbar(opts: SetupToolbarOpts): ToolbarController {
       toolbar.root.style.left = `${pos.left}px`;
       toolbar.root.style.top = `${pos.top}px`;
       toolbar.root.dataset.placement = pos.placement;
+      // Toolbar width may have changed (e.g. first show after layout) — let
+      // the crumb strip recompute its overflow.
+      crumbs.refit();
     });
   }
 
@@ -209,6 +225,7 @@ export function setupFormatToolbar(opts: SetupToolbarOpts): ToolbarController {
     if (state.kind === 'editing') {
       activeBlock = state.block;
       activeBlockId = state.blockId;
+      crumbs.sync(state.block);
       toolbar.show();
       // Wait one frame so getBoundingClientRect reflects any layout change.
       requestAnimationFrame(() => {
@@ -218,6 +235,7 @@ export function setupFormatToolbar(opts: SetupToolbarOpts): ToolbarController {
     } else {
       activeBlock = null;
       activeBlockId = null;
+      crumbs.sync(null);
       toolbar.hide();
     }
   });
@@ -231,6 +249,7 @@ export function setupFormatToolbar(opts: SetupToolbarOpts): ToolbarController {
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('scroll', onScrollOrResize, true);
       window.removeEventListener('resize', onScrollOrResize);
+      crumbs.destroy();
       toolbar.destroy();
     },
   };

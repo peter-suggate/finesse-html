@@ -25,6 +25,16 @@ export interface ButtonSpec {
 
 export interface ToolbarHandle {
   root: HTMLDivElement;
+  /**
+   * Empty container above the button row, intended for the breadcrumb strip.
+   * Hidden via `:empty` so the toolbar collapses to its button row when no
+   * crumbs are rendered. Wider than the button row may force the toolbar to
+   * grow; the controller is responsible for trimming content (or its own
+   * width) to keep things tidy.
+   */
+  crumbs: HTMLDivElement;
+  /** The button row beneath the breadcrumbs. */
+  buttonsRow: HTMLDivElement;
   buttons: Map<string, HTMLElement>;
   setActive(name: string, on: boolean): void;
   setSelectValue(name: string, value: string): void;
@@ -41,9 +51,9 @@ const CSS = `
   position: fixed;
   z-index: 2147483645;
   display: none;
-  align-items: center;
-  gap: 1px;
-  padding: 4px;
+  flex-direction: column;
+  align-items: stretch;
+  max-width: 520px;
   background: rgba(28, 28, 30, 0.96);
   color: #f5f5f7;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -59,6 +69,28 @@ const CSS = `
   transform: translateY(4px);
   transition: opacity 120ms ease-out, transform 120ms ease-out;
   -webkit-font-smoothing: antialiased;
+}
+.finesse-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 4px;
+}
+.finesse-toolbar-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 6px 0 6px;
+  font-size: 11px;
+  color: #d8d8dc;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  position: relative;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.finesse-toolbar-crumbs:empty {
+  display: none;
 }
 .finesse-toolbar-root[data-visible="true"] {
   opacity: 1;
@@ -142,6 +174,100 @@ const CSS = `
   background: #1c1c1e;
   color: #f5f5f7;
 }
+.finesse-crumb {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  opacity: 0.62;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+button.finesse-crumb:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+.finesse-crumb-leaf {
+  opacity: 1;
+  color: #6cb0ff;
+  font-weight: 600;
+  cursor: default;
+}
+.finesse-crumb-sep {
+  font-size: 10px;
+  opacity: 0.4;
+  padding: 0 1px;
+  pointer-events: none;
+}
+.finesse-crumb-overflow {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  opacity: 0.62;
+  cursor: pointer;
+  line-height: 1;
+}
+button.finesse-crumb-overflow:hover,
+button.finesse-crumb-overflow[aria-expanded="true"] {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+.finesse-crumb-menu {
+  position: fixed;
+  z-index: 2147483646;
+  min-width: 120px;
+  max-width: 260px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: rgba(28, 28, 30, 0.98);
+  color: #f5f5f7;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 3px;
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.32),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+  display: none;
+}
+.finesse-crumb-menu[data-open="true"] { display: block; }
+.finesse-crumb-menu-item {
+  appearance: none;
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.finesse-crumb-menu-item:hover,
+.finesse-crumb-menu-item:focus-visible {
+  background: rgba(108, 176, 255, 0.18);
+  color: #6cb0ff;
+  outline: none;
+}
 @media (prefers-color-scheme: light) {
   .finesse-toolbar-root {
     background: rgba(255, 255, 255, 0.98);
@@ -150,6 +276,27 @@ const CSS = `
     box-shadow:
       0 6px 24px rgba(0, 0, 0, 0.12),
       0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  .finesse-toolbar-crumbs {
+    color: #4a4a4f;
+    border-bottom-color: rgba(0, 0, 0, 0.06);
+  }
+  button.finesse-crumb:hover { background: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
+  .finesse-crumb-leaf { color: #1e6fd9; }
+  button.finesse-crumb-overflow:hover,
+  button.finesse-crumb-overflow[aria-expanded="true"] {
+    background: rgba(0, 0, 0, 0.06);
+    color: #1c1c1e;
+  }
+  .finesse-crumb-menu {
+    background: rgba(255, 255, 255, 0.98);
+    color: #1c1c1e;
+    border-color: rgba(0, 0, 0, 0.08);
+  }
+  .finesse-crumb-menu-item:hover,
+  .finesse-crumb-menu-item:focus-visible {
+    background: rgba(30, 111, 217, 0.12);
+    color: #1e6fd9;
   }
   .finesse-toolbar-btn { color: #4a4a4f; }
   .finesse-toolbar-btn:hover { background: rgba(0, 0, 0, 0.06); color: #1c1c1e; }
@@ -190,6 +337,18 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
   root.dataset.visible = 'false';
   root.dataset.placement = 'above';
 
+  const crumbs = document.createElement('div');
+  crumbs.className = 'finesse-toolbar-crumbs';
+  // Don't steal caret focus when the user clicks a crumb.
+  crumbs.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+  });
+  root.appendChild(crumbs);
+
+  const buttonsRow = document.createElement('div');
+  buttonsRow.className = 'finesse-toolbar-row';
+  root.appendChild(buttonsRow);
+
   const buttons = new Map<string, HTMLElement>();
   const handlers: Array<(name: string, value?: string) => void> = [];
 
@@ -202,7 +361,7 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
       const sep = document.createElement('span');
       sep.className = 'finesse-toolbar-sep';
       sep.setAttribute('aria-hidden', 'true');
-      root.appendChild(sep);
+      buttonsRow.appendChild(sep);
       continue;
     }
     if (spec.kind === 'select') {
@@ -225,7 +384,7 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
         fireAction(spec.name, select.value);
       });
       buttons.set(spec.name, select);
-      root.appendChild(select);
+      buttonsRow.appendChild(select);
       continue;
     }
     const btn = document.createElement('button');
@@ -246,13 +405,15 @@ export function buildToolbar(specs: readonly ButtonSpec[]): ToolbarHandle {
       fireAction(spec.name);
     });
     buttons.set(spec.name, btn);
-    root.appendChild(btn);
+    buttonsRow.appendChild(btn);
   }
 
   document.body.appendChild(root);
 
   return {
     root,
+    crumbs,
+    buttonsRow,
     buttons,
     setActive(name, on) {
       const el = buttons.get(name);

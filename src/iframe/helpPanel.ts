@@ -23,7 +23,6 @@ const isMac =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform);
 const MOD = isMac ? '⌘' : 'Ctrl';
 const SHIFT = isMac ? '⇧' : 'Shift';
-const ALT = isMac ? '⌥' : 'Alt';
 
 interface Row {
   keys: string[];
@@ -32,7 +31,7 @@ interface Row {
 
 const ROWS: readonly Row[] = [
   { keys: ['Click'], label: 'Edit text' },
-  { keys: [ALT, 'Click'], label: 'Use link / button' },
+  { keys: ['V', 'Click'], label: 'Use link / button' },
   { keys: ['Tab'], label: 'Next element' },
   { keys: ['Enter'], label: 'Edit focused' },
   { keys: ['Del'], label: 'Remove' },
@@ -169,6 +168,7 @@ function buildPanel(): PanelDom {
     opacity: String(MAX_OPACITY),
     transition: 'opacity 140ms ease-out',
     userSelect: 'none',
+    pointerEvents: 'none',
   } satisfies Partial<CSSStyleDeclaration>);
   root.style.setProperty('-webkit-backdrop-filter', 'blur(10px)');
 
@@ -206,6 +206,7 @@ function buildPanel(): PanelDom {
     lineHeight: '14px',
     cursor: 'pointer',
     fontFamily: 'inherit',
+    pointerEvents: 'auto',
   } satisfies Partial<CSSStyleDeclaration>);
 
   header.appendChild(title);

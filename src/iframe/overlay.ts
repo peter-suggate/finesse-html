@@ -47,18 +47,37 @@ const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
   transition: 'opacity 100ms ease-out, color 100ms ease-out',
 };
 
+const NATIVE_CLICK_HINT_STYLE: Partial<CSSStyleDeclaration> = {
+  position: 'fixed',
+  pointerEvents: 'none',
+  padding: '2px 6px',
+  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontSize: '11px',
+  lineHeight: '16px',
+  color: '#ffffff',
+  background: 'rgba(30, 111, 217, 0.92)',
+  borderRadius: '3px',
+  zIndex: '2147483643',
+  display: 'none',
+  boxShadow: '0 1px 4px rgba(0,0,0,0.22)',
+  whiteSpace: 'nowrap',
+};
+
 export function setupOverlay(opts: OverlayOpts): void {
   const { session } = opts;
   const hover = createOverlay(HOVER_STYLE, 'finesse-hover');
   const selection = createOverlay(SELECTION_STYLE, 'finesse-selection');
   const deleteBtn = createDeleteButton();
+  const nativeClickHint = createNativeClickHint();
   document.body.appendChild(hover);
   document.body.appendChild(selection);
   document.body.appendChild(deleteBtn);
+  document.body.appendChild(nativeClickHint);
 
   let hoveredEl: HTMLElement | null = null;
   let focusedEl: HTMLElement | null = null;
   let selectedEl: HTMLElement | null = null;
+  let lastHoverTarget: HTMLElement | null = null;
   let nativeClickBypass = false;
 
   function rectOf(el: HTMLElement): DOMRect {
@@ -113,9 +132,30 @@ export function setupOverlay(opts: OverlayOpts): void {
     hover.style.display = 'none';
     selection.style.display = 'none';
     deleteBtn.style.display = 'none';
+    nativeClickHint.style.display = 'none';
     setHoveredEl(null);
     setFocusedEl(null);
     setSelectedEl(null);
+  }
+
+  function showNativeClickHint(el: HTMLElement | null): void {
+    if (!el || session.hasActiveBlock() || session.isLocked() || !isInteractiveClickTarget(el)) {
+      nativeClickHint.style.display = 'none';
+      return;
+    }
+    const r = rectOf(el);
+    nativeClickHint.style.display = 'block';
+    const left = Math.min(
+      Math.max(7, r.left),
+      Math.max(7, window.innerWidth - nativeClickHint.offsetWidth - 7),
+    );
+    const preferredTop = r.bottom + 6;
+    const top =
+      preferredTop + nativeClickHint.offsetHeight <= window.innerHeight - 7
+        ? preferredTop
+        : Math.max(7, r.top - nativeClickHint.offsetHeight - 6);
+    nativeClickHint.style.left = `${left}px`;
+    nativeClickHint.style.top = `${top}px`;
   }
 
   function showHover(el: HTMLElement | null): void {
@@ -147,21 +187,44 @@ export function setupOverlay(opts: OverlayOpts): void {
     refreshDeleteButton();
   }
 
+  // Programmatic selection (e.g. user clicks a breadcrumb in the side panel
+  // or the toolbar's parent dropdown). The session fires onSelectionChange
+  // listeners with the new element; sync the overlay's selection ring and
+  // local refs so subsequent hover/click handling stays consistent.
+  session.onSelectionChange((el) => {
+    if (el === selectedEl) return;
+    if (!el) {
+      setSelectedEl(null);
+      showSelection(null);
+      return;
+    }
+    setSelectedEl(el);
+    setHoveredEl(null);
+    setFocusedEl(null);
+    hover.style.display = 'none';
+    showSelection(el);
+  });
+
   document.addEventListener('mousemove', (e) => {
+    const target = elementFromEventTarget(e.target);
+    lastHoverTarget = pickHoverTarget(target);
     if (nativeClickBypass || session.isLocked() || session.hasActiveBlock()) {
       hover.style.display = 'none';
       setHoveredEl(null);
       if (nativeClickBypass) deleteBtn.style.display = 'none';
+      showNativeClickHint(nativeClickBypass ? lastHoverTarget : null);
       return;
     }
-    const target = elementFromEventTarget(e.target);
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (target && isInOverlayUi(target)) return;
-    showHover(pickHoverTarget(target));
+    showHover(lastHoverTarget);
+    showNativeClickHint(lastHoverTarget);
   });
 
   document.addEventListener('mouseleave', () => {
     hover.style.display = 'none';
+    nativeClickHint.style.display = 'none';
+    lastHoverTarget = null;
     setHoveredEl(null);
   });
 
@@ -236,7 +299,6 @@ export function setupOverlay(opts: OverlayOpts): void {
     target: Element | null,
   ): boolean {
     if (nativeClickBypass) return true;
-    if (e.altKey) return true;
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return true;
     if (target && isInOverlayUi(target)) return true;
     return session.hasActiveBlock() && session.isInsideActive(target);
@@ -261,7 +323,7 @@ export function setupOverlay(opts: OverlayOpts): void {
       if (session.isLocked()) return;
       const target = elementFromEventTarget(e.target);
       if (shouldAllowNativeMouseEvent(e, target)) {
-        if (nativeClickBypass || e.altKey) clearNavigationUi();
+        if (nativeClickBypass) clearNavigationUi();
         return;
       }
       if (nativeClickBypass) {
@@ -280,7 +342,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     const target = elementFromEventTarget(e.target);
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (target && isInOverlayUi(target)) return;
-    if (nativeClickBypass || e.altKey) {
+    if (nativeClickBypass) {
       clearNavigationUi();
       return;
     }
@@ -298,11 +360,14 @@ export function setupOverlay(opts: OverlayOpts): void {
       session.requestCommandPalette();
       return;
     }
-    if (e.altKey && !isTextEntryTarget(document.activeElement)) {
+    if (isNativeClickBypassKey(e) && !isTextEntryTarget(document.activeElement)) {
       if (!nativeClickBypass) {
         nativeClickBypass = true;
         clearNavigationUi();
+        showNativeClickHint(lastHoverTarget);
       }
+      e.preventDefault();
+      return;
     }
     // Cmd/Ctrl+S: commit any active edit, then ask host to save.
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
@@ -414,8 +479,9 @@ export function setupOverlay(opts: OverlayOpts): void {
   });
 
   document.addEventListener('keyup', (e) => {
-    if (e.key !== 'Alt') return;
+    if (!isNativeClickBypassKey(e)) return;
     nativeClickBypass = false;
+    nativeClickHint.style.display = 'none';
   });
 
   document.addEventListener('focusin', (e) => {
@@ -467,6 +533,8 @@ export function setupOverlay(opts: OverlayOpts): void {
   const reposition = (): void => {
     hover.style.display = 'none';
     showSelection(null);
+    nativeClickHint.style.display = 'none';
+    lastHoverTarget = null;
     setHoveredEl(null);
     setFocusedEl(null);
     setSelectedEl(null);
@@ -476,6 +544,7 @@ export function setupOverlay(opts: OverlayOpts): void {
 
   window.addEventListener('blur', () => {
     nativeClickBypass = false;
+    nativeClickHint.style.display = 'none';
   });
 }
 
@@ -530,6 +599,10 @@ function isCommandPaletteShortcut(e: KeyboardEvent): boolean {
   return (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p';
 }
 
+function isNativeClickBypassKey(e: KeyboardEvent): boolean {
+  return !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'v';
+}
+
 function selectActiveBlockContents(block: HTMLElement | null): void {
   if (!block) return;
   const selection = window.getSelection();
@@ -555,6 +628,15 @@ function createDeleteButton(): HTMLButtonElement {
   btn.setAttribute('aria-label', 'Remove element');
   Object.assign(btn.style, DELETE_BUTTON_STYLE);
   return btn;
+}
+
+function createNativeClickHint(): HTMLDivElement {
+  const el = document.createElement('div');
+  el.id = 'finesse-native-click-hint';
+  el.textContent = 'Hold V + click';
+  Object.assign(el.style, NATIVE_CLICK_HINT_STYLE);
+  el.setAttribute('aria-hidden', 'true');
+  return el;
 }
 
 function createOverlay(style: Partial<CSSStyleDeclaration>, id: string): HTMLDivElement {

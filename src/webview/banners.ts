@@ -11,6 +11,7 @@ interface BannerOpts {
   dataKind?: string;
   action?: { label: string; onClick: () => void };
   dismissAfterMs?: number;
+  dismissible?: boolean;
 }
 
 function build(opts: BannerOpts): HTMLDivElement {
@@ -26,13 +27,15 @@ function build(opts: BannerOpts): HTMLDivElement {
     btn.addEventListener('click', opts.action.onClick);
     div.appendChild(btn);
   }
-  const dismiss = document.createElement('span');
-  dismiss.className = 'dismiss';
-  dismiss.textContent = '×';
-  dismiss.setAttribute('role', 'button');
-  dismiss.setAttribute('aria-label', 'Dismiss');
-  dismiss.addEventListener('click', () => div.remove());
-  div.appendChild(dismiss);
+  if (opts.dismissible !== false) {
+    const dismiss = document.createElement('span');
+    dismiss.className = 'dismiss';
+    dismiss.textContent = '×';
+    dismiss.setAttribute('role', 'button');
+    dismiss.setAttribute('aria-label', 'Dismiss');
+    dismiss.addEventListener('click', () => div.remove());
+    div.appendChild(dismiss);
+  }
   if (opts.dismissAfterMs) {
     setTimeout(() => div.remove(), opts.dismissAfterMs);
   }
@@ -68,12 +71,45 @@ export function showStaleReloadBanner(): void {
   container.appendChild(banner);
 }
 
+export function showUnsavedChangesBanner(opts: { onSave: () => void }): void {
+  if (!container) return;
+  if (container.querySelector('[data-kind="unsaved-changes"]')) return;
+  const banner = build({
+    kind: 'warn',
+    dataKind: 'unsaved-changes',
+    text: 'Unsaved changes in this file. Save before closing Finesse or switching tasks.',
+    action: { label: 'Save now', onClick: opts.onSave },
+    dismissible: false,
+  });
+  container.appendChild(banner);
+}
+
+export function dismissUnsavedChangesBanner(): void {
+  if (!container) return;
+  container
+    .querySelectorAll('[data-kind="unsaved-changes"]')
+    .forEach((existing) => existing.remove());
+}
+
 export function showRuntimeErrorBanner(message: string): void {
   if (!container) return;
   const banner = build({
     kind: 'error',
     dataKind: 'runtime-error',
     text: `Runtime error: ${message}`,
+  });
+  container.appendChild(banner);
+}
+
+export function showEditFailedBanner(message: string): void {
+  if (!container) return;
+  container
+    .querySelectorAll('[data-kind="edit-failed"]')
+    .forEach((existing) => existing.remove());
+  const banner = build({
+    kind: 'warn',
+    dataKind: 'edit-failed',
+    text: message,
   });
   container.appendChild(banner);
 }

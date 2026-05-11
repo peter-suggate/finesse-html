@@ -52,6 +52,11 @@ export type StaleCommit = {
   actualVersion: number;
 };
 
+export type EditFailed = {
+  type: 'editFailed';
+  message: string;
+};
+
 export type FileMeta = {
   type: 'fileMeta';
   /** Workspace-relative path of the file being previewed. */
@@ -64,8 +69,6 @@ export type DocumentState = {
   type: 'documentState';
   /** Whether the underlying TextDocument has unsaved changes. */
   isDirty: boolean;
-  /** Whether host-side auto-save-after-commit is currently enabled. */
-  autoSave: boolean;
   /** Whether the preview has a Finesse edit available to undo. */
   canUndo: boolean;
   /** Whether the preview has a Finesse edit available to redo. */
@@ -106,6 +109,7 @@ export type HostMessage =
   | Reload
   | EditAck
   | StaleCommit
+  | EditFailed
   | FileMeta
   | DocumentState
   | AgentSelectionState
@@ -236,6 +240,26 @@ export interface ClassRuleDeclaration {
   important: boolean;
 }
 
+export interface ClassRuleBlock {
+  /**
+   * Full selector text for the editable rule, e.g. `.lede` or `.hero .lede`.
+   * The rule is surfaced for a class only when at least one selector arm
+   * matches the selected element and references that class token.
+   */
+  selector: string;
+  declarations: ClassRuleDeclaration[];
+}
+
+/** One step in the ancestor chain of a selected element. */
+export type AncestorRef = {
+  elementId: number;
+  tagName: string;
+  /** `id` attribute if present. */
+  id?: string;
+  /** Up to a few class tokens for display (not necessarily the full list). */
+  classList?: string[];
+};
+
 export type ElementSelectionSnapshot = {
   documentVersion: number;
   elementId: number;
@@ -243,6 +267,13 @@ export type ElementSelectionSnapshot = {
   tagName: string;
   domPath: string;
   selectorHints: string[];
+  /**
+   * Ancestor chain leading up to (and excluding) this element, ordered
+   * shallowest → deepest (i.e. document root first, immediate parent last).
+   * Only includes ancestors the iframe tracks via `data-finesse-id`. Consumers
+   * may render breadcrumbs (left-to-right) or a parent dropdown.
+   */
+  ancestors?: AncestorRef[];
   /** Tokens from this element's `class` attribute, in source order. */
   classList: string[];
   /**
@@ -252,13 +283,12 @@ export type ElementSelectionSnapshot = {
    */
   classCatalog: string[];
   /**
-   * For each class on this element, the CSS declarations defined by the
-   * top-level rule(s) whose selector is exactly `.className`. Declarations
-   * appear in source order; later declarations of the same property override
-   * earlier ones (we still surface both so the user can edit either).
+   * For each class on this element, editable CSS rules whose selectors match
+   * the selected element and mention that class token. This includes contextual
+   * selectors such as `.hero .lede`, not only standalone `.lede` rules.
    * Classes with no matching rule simply don't appear as keys.
    */
-  classRules: Record<string, ClassRuleDeclaration[]>;
+  classRules: Record<string, ClassRuleBlock[]>;
   textPreview: string;
   outerHtmlPreview: string;
   rect: {
@@ -334,7 +364,17 @@ export type PanelCssEdit = {
   value: string | null;
 };
 
-export type ChromeIframeMessage = PanelStyleEdit | PanelCssEdit;
+/**
+ * Chrome asks the iframe to programmatically select the element with the given
+ * id (e.g. user clicked a breadcrumb in the side panel). The iframe updates
+ * its selection state and re-announces it back to the chrome.
+ */
+export type PanelSelectElement = {
+  type: 'panelSelectElement';
+  elementId: number;
+};
+
+export type ChromeIframeMessage = PanelStyleEdit | PanelCssEdit | PanelSelectElement;
 
 /** Everything the iframe's window-message listener may receive. */
 export type IframeInboundMessage = HostMessage | ChromeIframeMessage;
@@ -350,7 +390,6 @@ export type WebviewActionMessage =
   | { type: '__webview_action'; action: 'editAnyway' }
   | { type: '__webview_action'; action: 'save' }
   | { type: '__webview_action'; action: 'discard' }
-  | { type: '__webview_action'; action: 'setAutoSave'; value: boolean }
   | { type: '__webview_action'; action: 'undo' }
   | { type: '__webview_action'; action: 'redo' }
   | { type: '__webview_action'; action: 'commandPalette' }

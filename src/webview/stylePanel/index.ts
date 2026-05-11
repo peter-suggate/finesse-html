@@ -17,6 +17,7 @@
 import type {
   ElementSelectionSnapshot,
   PanelCssEdit,
+  PanelSelectElement,
   PanelStyleEdit,
 } from '../../shared/protocol';
 import {
@@ -42,10 +43,11 @@ import {
   type ClassRuleSectionsHandle,
   type ClassesSectionHandle,
 } from './classesPanel';
+import { breadcrumbsBar, type BreadcrumbsHandle } from './breadcrumbsPanel';
 
 export interface StylePanelSender {
-  /** Post a chrome→iframe message (style or CSS-class edit) into the iframe. */
-  toIframe(msg: PanelStyleEdit | PanelCssEdit): void;
+  /** Post a chrome→iframe message into the iframe. */
+  toIframe(msg: PanelStyleEdit | PanelCssEdit | PanelSelectElement): void;
 }
 
 export interface SetupSidePanelOpts {
@@ -85,6 +87,12 @@ export function setupSidePanel(opts: SetupSidePanelOpts): SidePanelController {
   lockedNote.hidden = true;
   root.appendChild(lockedNote);
 
+  const breadcrumbs: BreadcrumbsHandle = breadcrumbsBar((elementId) => {
+    sender.toIframe({ type: 'panelSelectElement', elementId });
+  });
+  breadcrumbs.root.hidden = true;
+  root.appendChild(breadcrumbs.root);
+
   const body = document.createElement('div');
   body.className = 'sp-body';
   root.appendChild(body);
@@ -115,7 +123,22 @@ export function setupSidePanel(opts: SetupSidePanelOpts): SidePanelController {
     syncSections(after);
   }
 
-  const classes: ClassesSectionHandle = classesSection(commit);
+  /**
+   * Commit a single attribute mutation (not the inline `style` map). Used by
+   * the Classes section to write the element's `class` attribute directly,
+   * bypassing the inline-style serialiser that `commit` runs through.
+   */
+  function commitAttr(attrs: Record<string, string | null>): void {
+    if (!currentSelection || locked) return;
+    sender.toIframe({
+      type: 'panelStyleEdit',
+      documentVersion: currentSelection.documentVersion,
+      elementId: currentSelection.elementId,
+      attrs,
+    });
+  }
+
+  const classes: ClassesSectionHandle = classesSection(commitAttr);
   body.appendChild(classes.root);
 
   const sections: SectionHandle[] = [
@@ -192,6 +215,7 @@ export function setupSidePanel(opts: SetupSidePanelOpts): SidePanelController {
       classes.sync(selection.classList, selection.classCatalog);
       classRules.sync(selection.classList, selection.classRules);
     }
+    breadcrumbs.sync(selection);
     syncSections();
   }
 
@@ -549,6 +573,57 @@ const SP_CSS = `
   opacity: 0.85;
 }
 
+.sp-breadcrumbs {
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
+  padding: 4px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+.sp-breadcrumbs::-webkit-scrollbar { height: 4px; }
+.sp-breadcrumbs::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(128,128,128,0.4));
+  border-radius: 2px;
+}
+.sp-breadcrumbs-list {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.sp-crumb {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 1px 4px;
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10.5px;
+  color: var(--vscode-foreground, inherit);
+  opacity: 0.62;
+  cursor: pointer;
+  border-radius: 2px;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+button.sp-crumb:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06));
+  color: var(--vscode-textLink-foreground, #4cb6ff);
+}
+.sp-crumb-leaf {
+  opacity: 1;
+  color: var(--vscode-textLink-foreground, #4cb6ff);
+  font-weight: 600;
+  cursor: default;
+}
+.sp-crumb-sep {
+  font-size: 10px;
+  opacity: 0.4;
+  padding: 0 1px;
+  pointer-events: none;
+}
+
 .sp-chips {
   display: flex;
   flex-wrap: wrap;
@@ -667,6 +742,21 @@ const SP_CSS = `
 }
 .sp-classrule-content {
   gap: 4px;
+}
+.sp-classrule-selector {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10.5px;
+  color: var(--vscode-descriptionForeground, inherit);
+  opacity: 0.82;
+  padding: 2px 0 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sp-classrule-selector:not(:first-child) {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
 }
 .sp-classrule-empty {
   font-size: 11px;

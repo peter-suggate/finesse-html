@@ -1,8 +1,10 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { registerCommands } from './commands';
 import { onConfigChange, readConfig, type ResolvedConfig } from './config';
 import { handleDocumentChange } from './documentWatcher';
+import { decideExternalFileConflict } from './externalFileConflict';
 import { FileWatcher } from './fileWatcher';
 import type { PreviewPanel } from './panel';
 import { createPreviewServer, type PreviewServer } from './server';
@@ -152,18 +154,7 @@ async function ensureServer(): Promise<PreviewServer> {
       debounceMs: state.config.reloadDebounceMs,
       onHtmlChange: (uri) => {
         if (!state) return;
-        const fsPath = uri.fsPath;
-        const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === fsPath);
-        // If the doc is open, the text-document watcher already handled it.
-        if (doc) return;
-        for (const panel of state.panels.values()) {
-          if (panel.documentUri.fsPath === fsPath) {
-            // Reparse using the on-disk content via VS Code's openTextDocument.
-            void vscode.workspace.openTextDocument(uri).then((freshDoc) => {
-              panel.onDocumentChanged(freshDoc, 'external');
-            });
-          }
-        }
+        void handleExternalHtmlChange(uri);
       },
       onAssetChange: (_uri) => {
         // Any CSS/JS/asset change → reload all previews so they pull the new resource.
@@ -173,6 +164,67 @@ async function ensureServer(): Promise<PreviewServer> {
   }
 
   return server;
+}
+
+async function handleExternalHtmlChange(uri: vscode.Uri): Promise<void> {
+  if (!state) return;
+  const fsPath = uri.fsPath;
+  const panel = Array.from(state.panels.values()).find(
+    (p) => p.documentUri.fsPath === fsPath,
+  );
+  if (!panel) return;
+
+  let diskText: string;
+  try {
+    diskText = fs.readFileSync(fsPath, 'utf-8');
+  } catch {
+    // File deleted/unreadable between watcher fire and read — nothing to do.
+    return;
+  }
+
+  const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === fsPath);
+  if (!doc) {
+    // Doc isn't open in any editor: open it (which reads from disk) and
+    // dispatch through the regular change path.
+    const freshDoc = await vscode.workspace.openTextDocument(uri);
+    panel.onDocumentChanged(freshDoc, 'external');
+    return;
+  }
+
+  const conflictDecision = decideExternalFileConflict({
+    diskText,
+    documentText: doc.getText(),
+    isDirty: doc.isDirty,
+  });
+  if (conflictDecision.action === 'noop') {
+    // Watcher fired but content matches in-memory.
+    return;
+  }
+
+  const dirtyText = conflictDecision.documentState === 'dirty' ? ' with unsaved edits' : '';
+  const choice = await vscode.window.showWarningMessage(
+    `${path.basename(fsPath)} changed on disk${dirtyText}. What should Finesse do?`,
+    { modal: false },
+    'Reload from disk',
+    'Keep editor contents',
+  );
+  if (choice !== 'Reload from disk') return;
+
+  await replaceDocumentText(doc, diskText);
+  await doc.save();
+}
+
+async function replaceDocumentText(
+  doc: vscode.TextDocument,
+  newText: string,
+): Promise<void> {
+  const edit = new vscode.WorkspaceEdit();
+  const fullRange = new vscode.Range(
+    doc.positionAt(0),
+    doc.positionAt(doc.getText().length),
+  );
+  edit.replace(doc.uri, fullRange, newText);
+  await vscode.workspace.applyEdit(edit);
 }
 
 function readDocumentText(workspaceRoot: string, relPath: string): string | null {

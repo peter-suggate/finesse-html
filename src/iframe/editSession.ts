@@ -1,4 +1,6 @@
 import type {
+  AncestorRef,
+  ClassRuleBlock,
   ClassRuleDeclaration,
   ElementSelectionSnapshot,
   ElementStyleSnapshot,
@@ -96,6 +98,12 @@ export interface EditSession {
   blockIdFor(el: HTMLElement): number | null;
   /** Build a source-backed snapshot for the currently selected element. */
   describeElement(el: HTMLElement): ElementSelectionSnapshot | null;
+  /**
+   * Walk parentElement and return tracked ancestors (those with a
+   * `data-finesse-id` mapping) ordered shallowest → deepest. Excludes `el`
+   * itself.
+   */
+  collectAncestors(el: HTMLElement): AncestorRef[];
   /** Tell the host which element the user has selected for agent context. */
   announceElementSelection(el: HTMLElement | null): void;
   /**
@@ -599,10 +607,12 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       tagName: element.tagName || el.tagName.toLowerCase(),
       domPath: domPathFor(el),
       selectorHints: selectorHintsFor(el),
+      ancestors: collectAncestors(el),
       classList: classTokens(el),
       classCatalog: collectDocumentClassCatalog(el.ownerDocument ?? document),
       classRules: collectClassRules(
         el.ownerDocument ?? document,
+        el,
         classTokens(el),
       ),
       textPreview: limit(el.innerText || el.textContent || '', 500),
@@ -615,6 +625,28 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       },
       styles: snapshotStyles(el),
     };
+  }
+
+  function collectAncestors(el: HTMLElement): AncestorRef[] {
+    const out: AncestorRef[] = [];
+    let cur: HTMLElement | null = el.parentElement;
+    while (cur) {
+      const id = elementToElementId.get(cur);
+      if (id !== undefined) {
+        const ref: AncestorRef = {
+          elementId: id,
+          tagName: cur.tagName.toLowerCase(),
+        };
+        if (cur.id) ref.id = cur.id;
+        const classes = classTokens(cur);
+        if (classes.length > 0) ref.classList = classes.slice(0, 4);
+        out.push(ref);
+      }
+      cur = cur.parentElement;
+    }
+    // Walked deepest → shallowest; flip so consumers can read root-first.
+    out.reverse();
+    return out;
   }
 
   function announceElementSelection(el: HTMLElement | null): void {
@@ -799,6 +831,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     onEditStateChange,
     blockIdFor,
     describeElement,
+    collectAncestors,
     announceElementSelection,
     sendBlockHtmlCommit,
     sendBlockTagCommit,
@@ -883,25 +916,20 @@ function collectDocumentClassCatalog(doc: Document): string[] {
 
 /**
  * Walk `document.styleSheets` and collect declarations for top-level rules
- * whose selector is exactly `.className`. Conservative on purpose for v1:
- *
- *   - skip rules nested inside @media / @supports / @keyframes
- *   - skip rules whose selector list contains anything other than `.cls`
- *     (e.g. `.cls:hover`, `.cls .other`, `.cls, .other` — none of these are
- *     editable through this section yet)
- *   - skip cross-origin stylesheets (accessing `.cssRules` throws)
- *
- * Rules from `<style>` blocks in the same document pass through fine; that's
- * the primary supported case.
+ * whose selectors match the selected element and mention one of its applied
+ * class tokens. That surfaces contextual rules like `.hero .lede` under the
+ * `.lede` class without showing unrelated rules for the same token.
  */
 function collectClassRules(
   doc: Document,
+  el: HTMLElement,
   classes: string[],
-): Record<string, ClassRuleDeclaration[]> {
+): Record<string, ClassRuleBlock[]> {
   if (classes.length === 0) return {};
   const wanted = new Set(classes);
-  const out: Record<string, ClassRuleDeclaration[]> = {};
+  const out: Record<string, ClassRuleBlock[]> = {};
   for (const sheet of Array.from(doc.styleSheets)) {
+    if (!isSameDocumentStyleSheet(sheet)) continue;
     let rules: CSSRuleList;
     try {
       rules = (sheet as CSSStyleSheet).cssRules;
@@ -912,25 +940,84 @@ function collectClassRules(
       const rule = rules[i];
       if (rule.type !== CSSRule.STYLE_RULE) continue;
       const styleRule = rule as CSSStyleRule;
-      const cls = singleClassSelector(styleRule.selectorText);
-      if (!cls || !wanted.has(cls)) continue;
+      const matchedClasses = classesMatchedByRule(el, styleRule.selectorText, wanted);
+      if (matchedClasses.length === 0) continue;
       const decls = declarationsFromRule(styleRule);
       if (decls.length === 0) continue;
-      const bucket = out[cls] ?? (out[cls] = []);
-      bucket.push(...decls);
+      for (const cls of matchedClasses) {
+        const bucket = out[cls] ?? (out[cls] = []);
+        bucket.push({
+          selector: styleRule.selectorText.trim(),
+          declarations: decls,
+        });
+      }
     }
   }
   return out;
 }
 
-/**
- * Return the class name if the selector is a single class with no
- * combinators / pseudos / attribute parts. Otherwise null.
- */
-function singleClassSelector(selectorText: string): string | null {
-  const trimmed = selectorText.trim();
-  const m = /^\.([A-Za-z_][\w-]*)$/.exec(trimmed);
-  return m ? m[1] : null;
+function classesMatchedByRule(
+  el: HTMLElement,
+  selectorText: string,
+  wanted: ReadonlySet<string>,
+): string[] {
+  const matched = new Set<string>();
+  for (const selector of splitSelectorList(selectorText)) {
+    if (!selectorMatches(el, selector)) continue;
+    for (const cls of wanted) {
+      if (selectorMentionsClass(selector, cls)) matched.add(cls);
+    }
+  }
+  return Array.from(matched);
+}
+
+function selectorMatches(el: HTMLElement, selector: string): boolean {
+  try {
+    return el.matches(selector);
+  } catch {
+    return false;
+  }
+}
+
+function selectorMentionsClass(selector: string, className: string): boolean {
+  const escaped = cssEscape(className);
+  const re = new RegExp(`\\.${escapeRegExp(escaped)}(?![-_a-zA-Z0-9])`);
+  return re.test(selector);
+}
+
+function splitSelectorList(selectorText: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let bracketDepth = 0;
+  let parenDepth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < selectorText.length; i++) {
+    const ch = selectorText[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '[') bracketDepth++;
+    else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+    else if (ch === ',' && bracketDepth === 0 && parenDepth === 0) {
+      const item = selectorText.slice(start, i).trim();
+      if (item) out.push(item);
+      start = i + 1;
+    }
+  }
+  const tail = selectorText.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
 }
 
 /**
@@ -946,6 +1033,7 @@ function applyCssOptimistic(
   value: string | null,
 ): void {
   for (const sheet of Array.from(doc.styleSheets)) {
+    if (!isSameDocumentStyleSheet(sheet)) continue;
     let rules: CSSRuleList;
     try {
       rules = (sheet as CSSStyleSheet).cssRules;
@@ -962,6 +1050,10 @@ function applyCssOptimistic(
       return;
     }
   }
+}
+
+function isSameDocumentStyleSheet(sheet: StyleSheet): boolean {
+  return sheet.ownerNode instanceof HTMLStyleElement;
 }
 
 function declarationsFromRule(rule: CSSStyleRule): ClassRuleDeclaration[] {
@@ -1023,6 +1115,10 @@ function cssEscape(value: string): string {
     return CSS.escape(value);
   }
   return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function placeCaretAtEnd(el: HTMLElement): void {

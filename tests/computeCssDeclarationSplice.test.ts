@@ -175,4 +175,39 @@ describe('computeCssDeclarationSplice', () => {
     const next = apply(source, r.splices);
     expect(next).toContain('.x { padding: 9px; }</style>\n<style>.x { padding: 2px; }');
   });
+
+  it('edits contextual class selectors', () => {
+    const source = [
+      '<style>',
+      '.hero .lede {',
+      '  max-width: 760px;',
+      '  font-size: 18px;',
+      '}',
+      '</style>',
+    ].join('\n');
+    const r = computeCssDeclarationSplice({
+      source,
+      selector: '.hero .lede',
+      property: 'font-size',
+      value: '20px',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const next = apply(source, r.splices);
+    expect(next).toContain('font-size: 20px;');
+  });
+
+  it('matches browser-normalized selector spacing back to source', () => {
+    const source = '<style>.hero   >   .lede, .deck [data-kind=\"a,b\"] { color: red; }</style>';
+    const r = computeCssDeclarationSplice({
+      source,
+      selector: '.hero > .lede, .deck [data-kind="a,b"]',
+      property: 'color',
+      value: 'blue',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const next = apply(source, r.splices);
+    expect(next).toContain('color: blue;');
+  });
 });

@@ -4,9 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { computeBlockHtmlSplices, applySplicesToSource } from '../src/host/computeBlockHtmlSplices';
 import { computeBlockTagSplices } from '../src/host/blockTagTransform';
+import { createEditTransaction, EditHistory, hashText } from '../src/host/editHistory';
 import { walkEditable } from '../src/host/parse/walkEditable';
 import { createPreviewServer, type PreviewServer } from '../src/host/server';
-import { computeInverseSplices, UndoStack, type SpliceOp } from '../src/host/undoStack';
+import type { SpliceOp } from '../src/host/undoStack';
 import type { HostMessage, IframeMessage, OffsetMap } from '../src/shared/protocol';
 
 const repoRoot = path.resolve(__dirname, '..');
@@ -99,6 +100,41 @@ test('edits the copied source, saves it, validates the file, then cleans up', as
   }
 });
 
+test('disables undo and redo after stale history replay conflicts', async ({ page }) => {
+  const harness = await createHarness(page);
+  const editText = ' Conflict checked.';
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#lead-copy').click();
+    await page.keyboard.type(editText);
+    await page.keyboard.press('Enter');
+
+    await waitForMessages(page, 'editCommit', 1);
+    await waitForMessages(page, 'editAck', 1);
+    const beforeConflict = await waitForMessages(page, 'documentState', 1);
+    expect(beforeConflict.at(-1)).toMatchObject({ canUndo: true, canRedo: false });
+
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => {
+      const win = window as Window & { __e2eSuppressReload?: boolean };
+      win.__e2eSuppressReload = true;
+    });
+    harness.replaceSource((current) => current.replace('Acme Studio Launch Plan', 'External title'));
+
+    await page.evaluate(() => window.postMessage({ type: 'undoRequest' }, '*'));
+    await waitForMessages(page, 'undoRequest', 1);
+    await waitForMessages(page, 'reload', 1);
+    const afterConflict = await waitForMessages(page, 'documentState', 2);
+    expect(afterConflict.at(-1)).toMatchObject({ canUndo: false, canRedo: false });
+    expect(harness.currentText()).toContain(editText);
+    expect(harness.currentText()).toContain('External title');
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test('keeps data-no-edit and preformatted regions out of text edit mode', async ({ page }) => {
   const harness = await createHarness(page);
   try {
@@ -153,6 +189,43 @@ test('selects an element and emits agent context without running an agent', asyn
       return win.__e2eMessages ?? [];
     });
     expect(allMessages.some((candidate) => candidate.type === 'agentRunRequested')).toBe(false);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test('selection exposes only same-document style rules as editable class rules', async ({ page }) => {
+  const harness = await createHarness(
+    page,
+    `<!doctype html>
+<html>
+  <head>
+    <link rel="stylesheet" href="/linked.css">
+    <style>.local { color: red; }</style>
+  </head>
+  <body>
+    <p id="copy" class="local external">Editable copy</p>
+  </body>
+</html>`,
+    {
+      'linked.css': '.external { color: blue; }',
+    },
+  );
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#copy').click();
+
+    const messages = await waitForMessages(page, 'elementSelectionChanged', 1);
+    const message = messages[0] as Extract<IframeMessage, { type: 'elementSelectionChanged' }>;
+    expect(message.selection?.classRules.local).toEqual([
+      {
+        selector: '.local',
+        declarations: [{ property: 'color', value: 'red', important: false }],
+      },
+    ]);
+    expect(message.selection?.classRules.external).toBeUndefined();
   } finally {
     await harness.dispose();
   }
@@ -423,22 +496,34 @@ interface Harness {
   copyPath: string;
   url: string;
   copyExists(): boolean;
+  currentText(): string;
   diskText(): string;
+  replaceSource(update: (current: string) => string): void;
   dispose(): Promise<void>;
 }
 
-async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> {
+async function createHarness(
+  page: Page,
+  sourceHtml?: string,
+  extraFiles: Record<string, string> = {},
+): Promise<Harness> {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'finesse-e2e-'));
   const relativePath = 'detailed-example.html';
   const copyPath = path.join(workspaceRoot, relativePath);
   if (sourceHtml === undefined) fs.copyFileSync(sourceFixturePath, copyPath);
   else fs.writeFileSync(copyPath, sourceHtml);
+  for (const [relativeFilePath, contents] of Object.entries(extraFiles)) {
+    const filePath = path.join(workspaceRoot, relativeFilePath);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, contents);
+  }
 
   let source = fs.readFileSync(copyPath, 'utf-8');
   let version = 1;
   let offsetMap = walkEditable(source, version);
   let dirty = false;
-  const undoStack = new UndoStack();
+  let nextEditTransactionId = 1;
+  const editHistory = new EditHistory();
 
   const server = createPreviewServer({
     workspaceRoot,
@@ -468,26 +553,30 @@ async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> 
   function applyIframeMessage(message: IframeMessage): HostMessage[] {
     switch (message.type) {
       case 'editCommit': {
+        const sourceBefore = source;
         const result = applyTextEdit(source, offsetMap, message);
-        recordForwardEdit(result.forward);
+        recordEditTransaction('Text edit', sourceBefore, result.source, result.forward);
         source = result.source;
         return acknowledgeEdit();
       }
       case 'editBlockHtml': {
+        const sourceBefore = source;
         const result = applyBlockHtmlEdit(source, offsetMap, message);
-        recordForwardEdit(result.forward);
+        recordEditTransaction('Block HTML edit', sourceBefore, result.source, result.forward);
         source = result.source;
         return acknowledgeEdit();
       }
       case 'editBlockTag': {
+        const sourceBefore = source;
         const result = applyBlockTagEdit(source, offsetMap, message);
-        recordForwardEdit(result.forward);
+        recordEditTransaction('Tag edit', sourceBefore, result.source, result.forward);
         source = result.source;
         return acknowledgeEdit();
       }
       case 'editRemove': {
+        const sourceBefore = source;
         const result = applyRemoveEdit(source, offsetMap, message);
-        recordForwardEdit(result.forward);
+        recordEditTransaction('Remove element', sourceBefore, result.source, result.forward);
         source = result.source;
         return acknowledgeEdit();
       }
@@ -496,17 +585,29 @@ async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> 
         dirty = false;
         return [documentState()];
       case 'undoRequest': {
-        const entry = undoStack.popUndo();
-        if (!entry) return [documentState()];
-        source = applySplices(source, entry.inverse);
-        undoStack.pushRedo(entry);
+        const op = editHistory.beginUndo();
+        if (!op) return [documentState()];
+        const entry = op.transaction;
+        if (hashText(source) !== entry.sourceHashAfter) {
+          op.abort();
+          editHistory.markExternalConflict('stale-replay');
+          return [{ type: 'reload', reason: 'stale-commit' }, documentState()];
+        }
+        source = applySplices(source, op.splices);
+        op.commit();
         return acknowledgeEdit();
       }
       case 'redoRequest': {
-        const entry = undoStack.popRedo();
-        if (!entry) return [documentState()];
-        source = applySplices(source, entry.forward);
-        undoStack.pushUndo(entry);
+        const op = editHistory.beginRedo();
+        if (!op) return [documentState()];
+        const entry = op.transaction;
+        if (hashText(source) !== entry.sourceHashBefore) {
+          op.abort();
+          editHistory.markExternalConflict('stale-replay');
+          return [{ type: 'reload', reason: 'stale-commit' }, documentState()];
+        }
+        source = applySplices(source, op.splices);
+        op.commit();
         return acknowledgeEdit();
       }
       default:
@@ -514,14 +615,31 @@ async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> 
     }
   }
 
-  function recordForwardEdit(forward: SpliceOp[]): void {
+  function recordEditTransaction(
+    label: string,
+    sourceBefore: string,
+    sourceAfter: string,
+    forward: SpliceOp[],
+  ): void {
     if (forward.length === 0) return;
-    undoStack.push({
-      forward,
-      inverse: computeInverseSplices(source, forward),
-      versionBefore: version,
-      versionAfter: version + 1,
-    });
+    editHistory.record(
+      createEditTransaction({
+        id: String(nextEditTransactionId++),
+        label,
+        sourceBefore,
+        sourceAfter,
+        forward,
+        versionBefore: version,
+        versionAfter: version + 1,
+      }),
+    );
+  }
+
+  function replaceSource(update: (current: string) => string): void {
+    source = update(source);
+    version += 1;
+    offsetMap = walkEditable(source, version);
+    dirty = true;
   }
 
   function acknowledgeEdit(): HostMessage[] {
@@ -535,9 +653,8 @@ async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> 
     return {
       type: 'documentState',
       isDirty: dirty,
-      autoSave: false,
-      canUndo: undoStack.canUndo(),
-      canRedo: undoStack.canRedo(),
+      canUndo: editHistory.canUndo(),
+      canRedo: editHistory.canRedo(),
     };
   }
 
@@ -545,7 +662,9 @@ async function createHarness(page: Page, sourceHtml?: string): Promise<Harness> 
     copyPath,
     url: `http://127.0.0.1:${port}/${relativePath}`,
     copyExists: () => fs.existsSync(copyPath),
+    currentText: () => source,
     diskText: () => fs.readFileSync(copyPath, 'utf-8'),
+    replaceSource,
     async dispose() {
       await server.stop();
       fs.rmSync(workspaceRoot, { recursive: true, force: true });
@@ -557,6 +676,7 @@ async function installMessageRecorder(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const win = window as Window & {
       __e2eMessages?: unknown[];
+      __e2eSuppressReload?: boolean;
       __finesseHostMessage?: (message: unknown) => Promise<void>;
     };
     win.__e2eMessages = [];
@@ -564,6 +684,11 @@ async function installMessageRecorder(page: Page): Promise<void> {
       const data = event.data as { type?: unknown } | null;
       if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
       win.__e2eMessages?.push(data);
+      if (data.type === 'reload' && win.__e2eSuppressReload) {
+        event.stopImmediatePropagation();
+        event.preventDefault();
+        return;
+      }
       if (isIframeToHostMessage(data.type)) {
         void win.__finesseHostMessage?.(data);
       }

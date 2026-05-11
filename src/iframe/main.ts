@@ -126,6 +126,16 @@ function setupHostMessageListener(session: EditSession): void {
         });
         break;
       }
+      case 'panelSelectElement': {
+        const el = session.findElementById(data.elementId);
+        if (!el) break;
+        // If a block is being text-edited, commit it before shifting selection
+        // so we don't lose in-flight typing.
+        if (session.hasActiveBlock()) session.commitEdit();
+        session.selectElement(el);
+        session.announceElementSelection(el);
+        break;
+      }
     }
   });
 }

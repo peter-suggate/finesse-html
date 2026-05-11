@@ -4,7 +4,6 @@ export interface StatusState {
   port?: number;
   locked?: boolean;
   isDirty?: boolean;
-  autoSave?: boolean;
   canUndo?: boolean;
   canRedo?: boolean;
   selectedLabel?: string;
@@ -14,7 +13,6 @@ export interface StatusState {
 export interface StatusActions {
   onSave: () => void;
   onDiscard: () => void;
-  onToggleAutoSave: (next: boolean) => void;
   onUndo: () => void;
   onRedo: () => void;
 }
@@ -30,7 +28,7 @@ let elDiscard: HTMLButtonElement | null = null;
 let elUndo: HTMLButtonElement | null = null;
 let elRedo: HTMLButtonElement | null = null;
 let elSelection: HTMLElement | null = null;
-let elAutoSave: HTMLInputElement | null = null;
+let elSaveState: HTMLElement | null = null;
 
 export function initStatus(initial: StatusState, actions?: StatusActions): void {
   elFile = document.getElementById('status-file');
@@ -43,15 +41,12 @@ export function initStatus(initial: StatusState, actions?: StatusActions): void 
   elUndo = document.getElementById('status-undo') as HTMLButtonElement | null;
   elRedo = document.getElementById('status-redo') as HTMLButtonElement | null;
   elSelection = document.getElementById('status-selection');
-  elAutoSave = document.getElementById('status-autosave') as HTMLInputElement | null;
+  elSaveState = document.getElementById('status-save-state');
   if (actions) {
     elSave?.addEventListener('click', () => actions.onSave());
     elDiscard?.addEventListener('click', () => actions.onDiscard());
     elUndo?.addEventListener('click', () => actions.onUndo());
     elRedo?.addEventListener('click', () => actions.onRedo());
-    elAutoSave?.addEventListener('change', () => {
-      actions.onToggleAutoSave(!!elAutoSave?.checked);
-    });
   }
   updateStatus(initial);
 }
@@ -63,9 +58,19 @@ export function updateStatus(patch: StatusState): void {
   if (elPort && state.port !== undefined) elPort.textContent = `:${state.port}`;
   if (elLocked) elLocked.hidden = !state.locked;
   if (elDirty) elDirty.classList.toggle('is-dirty', !!state.isDirty);
+  if (elSaveState) {
+    elSaveState.textContent = state.isDirty ? 'Unsaved changes' : 'Saved';
+    elSaveState.classList.toggle('is-dirty', !!state.isDirty);
+  }
   if (elSave) {
     elSave.disabled = !state.isDirty;
-    elSave.textContent = state.isDirty ? 'Save' : 'Saved';
+    elSave.textContent = state.isDirty ? 'Save now' : 'Saved';
+    elSave.classList.toggle('primary', !!state.isDirty);
+    elSave.title = state.isDirty ? 'Save changes to disk (⌘S)' : 'No unsaved changes';
+    elSave.setAttribute(
+      'aria-label',
+      state.isDirty ? 'Save changes to disk' : 'No unsaved changes',
+    );
   }
   if (elDiscard) elDiscard.disabled = !state.isDirty;
   if (elUndo) elUndo.disabled = !state.canUndo;
@@ -75,5 +80,4 @@ export function updateStatus(patch: StatusState): void {
     elSelection.textContent = label ? `selected: ${label}` : 'no selection';
     elSelection.hidden = !label;
   }
-  if (elAutoSave && state.autoSave !== undefined) elAutoSave.checked = state.autoSave;
 }

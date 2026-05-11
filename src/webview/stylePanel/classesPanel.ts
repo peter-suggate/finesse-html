@@ -10,7 +10,8 @@
  * caller routes to the iframe as a `panelCssEdit` message.
  */
 
-import type { ClassRuleDeclaration } from '../../shared/protocol';
+import type { ClassRuleBlock, ClassRuleDeclaration } from '../../shared/protocol';
+import { bumpCssValue, bumpStep } from './bumpCssValue';
 import type { CommitFn } from './sections';
 
 export type ClassRuleCommitFn = (
@@ -23,7 +24,7 @@ export interface ClassRuleSectionsHandle {
   root: HTMLElement;
   sync(
     classList: string[],
-    classRules: Record<string, ClassRuleDeclaration[]>,
+    classRules: Record<string, ClassRuleBlock[]>,
   ): void;
 }
 
@@ -269,13 +270,11 @@ export function classRuleSections(commit: ClassRuleCommitFn): ClassRuleSectionsH
 
   function sync(
     classList: string[],
-    classRules: Record<string, ClassRuleDeclaration[]>,
+    classRules: Record<string, ClassRuleBlock[]>,
   ): void {
     root.textContent = '';
     for (const cls of classList) {
-      const decls = classRules[cls];
-      const selector = `.${cls}`;
-      const section = makeClassRuleSection(selector, decls ?? [], commit);
+      const section = makeClassRuleSection(cls, classRules[cls] ?? [], commit);
       root.appendChild(section);
     }
   }
@@ -284,22 +283,23 @@ export function classRuleSections(commit: ClassRuleCommitFn): ClassRuleSectionsH
 }
 
 function makeClassRuleSection(
-  selector: string,
-  declarations: ClassRuleDeclaration[],
+  className: string,
+  rules: ClassRuleBlock[],
   commit: ClassRuleCommitFn,
 ): HTMLDetailsElement {
+  const blocks = normaliseRuleBlocks(className, rules);
   const details = document.createElement('details');
   details.className = 'sp-section sp-classrule';
-  // Open if there are declarations; collapse empty ones so they don't clutter.
-  details.open = declarations.length > 0;
+  // Open if there are rules; collapse empty ones so they don't clutter.
+  details.open = blocks.length > 0;
   const summary = document.createElement('summary');
   summary.className = 'sp-summary sp-classrule-summary';
   const title = document.createElement('span');
   title.className = 'sp-classrule-title';
-  title.textContent = selector;
+  title.textContent = `.${className}`;
   const count = document.createElement('span');
   count.className = 'sp-classrule-count';
-  count.textContent = declarations.length === 0 ? '(no rule)' : `${declarations.length}`;
+  count.textContent = blocks.length === 0 ? '(no rule)' : `${blocks.length}`;
   summary.appendChild(title);
   summary.appendChild(count);
   details.appendChild(summary);
@@ -308,22 +308,61 @@ function makeClassRuleSection(
   content.className = 'sp-content sp-classrule-content';
   details.appendChild(content);
 
-  if (declarations.length === 0) {
+  if (blocks.length === 0) {
     const note = document.createElement('div');
     note.className = 'sp-classrule-empty';
-    note.textContent = `No top-level rule for ${selector} in this file.`;
+    note.textContent = `No matching rule for .${className} in this file.`;
     content.appendChild(note);
     return details;
   }
 
-  for (const decl of declarations) {
-    content.appendChild(makeDeclarationRow(selector, decl, commit));
+  for (const rule of blocks) {
+    const selectorLabel = document.createElement('div');
+    selectorLabel.className = 'sp-classrule-selector';
+    selectorLabel.textContent = rule.selector;
+    content.appendChild(selectorLabel);
+    for (const decl of rule.declarations) {
+      content.appendChild(makeDeclarationRow(rule.selector, decl, commit));
+    }
+    content.appendChild(makeAddDeclarationRow(rule.selector, commit));
   }
 
-  const addRow = makeAddDeclarationRow(selector, commit);
-  content.appendChild(addRow);
-
   return details;
+}
+
+function normaliseRuleBlocks(
+  className: string,
+  rules: ClassRuleBlock[],
+): ClassRuleBlock[] {
+  if (!Array.isArray(rules)) return [];
+  if (rules.length === 0) return [];
+
+  const maybeLegacyDeclarations = rules as unknown as ClassRuleDeclaration[];
+  if (maybeLegacyDeclarations.every(isClassRuleDeclaration)) {
+    return [{ selector: `.${className}`, declarations: maybeLegacyDeclarations }];
+  }
+
+  return rules.filter(isClassRuleBlock);
+}
+
+function isClassRuleBlock(value: unknown): value is ClassRuleBlock {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ClassRuleBlock>;
+  return (
+    typeof candidate.selector === 'string' &&
+    Array.isArray(candidate.declarations) &&
+    candidate.declarations.every(isClassRuleDeclaration)
+  );
+}
+
+function isClassRuleDeclaration(value: unknown): value is ClassRuleDeclaration {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ClassRuleDeclaration>;
+  return (
+    typeof candidate.property === 'string' &&
+    typeof candidate.value === 'string' &&
+    typeof candidate.important === 'boolean'
+  );
 }
 
 function makeDeclarationRow(
@@ -347,11 +386,17 @@ function makeDeclarationRow(
   valueInput.autocomplete = 'off';
 
   let lastCommitted = valueInput.value;
+  let pendingCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearPendingCommit = (): void => {
+    if (!pendingCommitTimer) return;
+    clearTimeout(pendingCommitTimer);
+    pendingCommitTimer = null;
+  };
   const commitIfChanged = (): void => {
+    clearPendingCommit();
     const v = valueInput.value.trim();
     if (v === lastCommitted.trim()) return;
     if (v === '') {
-      // Treat empty as a removal.
       lastCommitted = '';
       commit(selector, decl.property, null);
       return;
@@ -359,16 +404,41 @@ function makeDeclarationRow(
     lastCommitted = v;
     commit(selector, decl.property, v);
   };
+  const scheduleCommit = (): void => {
+    clearPendingCommit();
+    pendingCommitTimer = setTimeout(commitIfChanged, 350);
+  };
+  /** Bump immediately commits — matches the existing numericInput convention. */
+  const commitValue = (next: string): void => {
+    clearPendingCommit();
+    valueInput.value = next;
+    lastCommitted = next;
+    commit(selector, decl.property, next);
+  };
+  valueInput.addEventListener('input', scheduleCommit);
   valueInput.addEventListener('blur', commitIfChanged);
   valueInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
       commitIfChanged();
       valueInput.blur();
-    } else if (e.key === 'Escape') {
+      return;
+    }
+    if (e.key === 'Escape') {
       e.preventDefault();
+      clearPendingCommit();
       valueInput.value = lastCommitted;
       valueInput.blur();
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      const step = bumpStep({ shift: e.shiftKey, alt: e.altKey });
+      const delta = (e.key === 'ArrowUp' ? 1 : -1) * step;
+      const bumped = bumpCssValue(valueInput.value, delta);
+      if (bumped !== null) {
+        e.preventDefault();
+        commitValue(bumped);
+      }
     }
   });
   row.appendChild(valueInput);

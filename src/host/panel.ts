@@ -35,10 +35,11 @@ import {
   type ReplacementEscaper,
 } from './applyEdit';
 import type { ResolvedConfig } from './config';
+import { createEditTransaction, EditHistory, hashText } from './editHistory';
 import { escapeForJsTemplate } from './jsTemplateEscape';
 import { detectTemplate, hasEditAnywayOverride, walkEditable, walkEditableInJs } from './parse';
 import { injectElementIds } from './server/inject';
-import { UndoStack, type UndoEntry } from './undoStack';
+import type { UndoEntry } from './undoStack';
 
 const JS_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'javascript',
@@ -84,7 +85,6 @@ export interface PanelDeps {
 }
 
 type IncomingMessage = IframeMessage | WebviewActionMessage;
-type SaveMode = 'manual' | 'auto';
 
 export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDeps): PreviewPanel {
   const relativePath = relativeWebPath(deps.workspaceRoot, document.uri.fsPath);
@@ -106,7 +106,6 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   let currentInjectedPreviewHtml: string | null = null;
   let isTemplated = false;
   let expectedSelfEditVersion: number | null = null;
-  let autoSave = true;
   let currentAgentSelection: ElementSelectionSnapshot | null = null;
   let agentRunning = false;
   const credentials = new AgentCredentialStore(deps.context);
@@ -114,7 +113,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   const escapeReplacement: ReplacementEscaper | undefined = jsMode
     ? escapeForJsTemplate
     : undefined;
-  const undoStack = new UndoStack();
+  const editHistory = new EditHistory();
+  let nextEditTransactionId = 1;
 
   function reparse(text: string, version: number): void {
     const structuralPatterns = deps.getConfig().templatePatterns;
@@ -162,9 +162,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     const msg: DocumentState = {
       type: 'documentState',
       isDirty: document.isDirty,
-      autoSave,
-      canUndo: undoStack.canUndo(),
-      canRedo: undoStack.canRedo(),
+      canUndo: editHistory.canUndo(),
+      canRedo: editHistory.canRedo(),
     };
     panel.webview.postMessage(msg);
   }
@@ -200,51 +199,15 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     panel.webview.postMessage(msg);
   }
 
-  async function saveDocument(opts: { mode: SaveMode }): Promise<void> {
+  async function saveDocument(): Promise<void> {
     if (!document.isDirty) return;
     try {
-      if (opts.mode === 'auto') {
-        await saveDocumentWithoutFormatting();
-      } else {
-        await document.save();
-      }
+      await document.save();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse save failed: ${message}`);
-    }
-  }
-
-  async function saveDocumentWithoutFormatting(): Promise<void> {
-    if (await trySaveWithoutFormattingInActiveEditor()) return;
-    await saveDocumentWithoutFocus();
-  }
-
-  async function trySaveWithoutFormattingInActiveEditor(): Promise<boolean> {
-    if (vscode.window.activeTextEditor?.document.uri.toString() !== document.uri.toString()) {
-      return false;
-    }
-    try {
-      await vscode.commands.executeCommand('workbench.action.files.saveWithoutFormatting');
-      return !document.isDirty;
-    } catch {
-      return false;
-    }
-  }
-
-  async function saveDocumentWithoutFocus(): Promise<void> {
-    const expectedFormattingVersion = document.version + 1;
-    try {
-      // VS Code's save-without-formatting command is active-editor scoped.
-      // When the preview webview is active, opening the source editor just to
-      // run it steals the user's editor slot. Save by URI instead so autosave
-      // persists the backing document without changing focus or layout.
-      expectedSelfEditVersion = expectedFormattingVersion;
-      const saved = await vscode.workspace.save(document.uri);
-      if (!saved) await document.save();
     } finally {
-      if (expectedSelfEditVersion === expectedFormattingVersion) {
-        expectedSelfEditVersion = null;
-      }
+      postDocumentState();
     }
   }
 
@@ -286,13 +249,9 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         if (msg.action === 'editAnyway') {
           await vscode.commands.executeCommand('finesse.editAnyway');
         } else if (msg.action === 'save') {
-          await saveDocument({ mode: 'manual' });
+          await saveDocument();
         } else if (msg.action === 'discard') {
           await discardChanges();
-        } else if (msg.action === 'setAutoSave') {
-          autoSave = !!msg.value;
-          postDocumentState();
-          if (autoSave) await saveDocument({ mode: 'auto' });
         } else if (msg.action === 'undo') {
           await handleUndoRequest();
         } else if (msg.action === 'redo') {
@@ -338,7 +297,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         handleEditCancel(msg);
         return;
       case 'saveRequest':
-        await saveDocument({ mode: 'manual' });
+        await saveDocument();
         return;
       case 'undoRequest':
         await handleUndoRequest();
@@ -370,13 +329,28 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     void postAgentConnectionState();
   }
 
-  function recordIfNonEmpty(entry: UndoEntry): void {
+  function recordIfNonEmpty(
+    entry: UndoEntry,
+    label: string,
+    sourceBefore: string,
+  ): void {
     if (entry.forward.length === 0) return;
-    undoStack.push(entry);
+    editHistory.record(
+      createEditTransaction({
+        id: String(nextEditTransactionId++),
+        label,
+        sourceBefore,
+        sourceAfter: document.getText(),
+        forward: entry.forward,
+        versionBefore: entry.versionBefore,
+        versionAfter: entry.versionAfter,
+      }),
+    );
   }
 
   async function handleEditCommit(msg: EditCommit): Promise<void> {
     try {
+      const sourceBefore = document.getText();
       const result = await applyEditCommit({
         document,
         currentVersion,
@@ -395,9 +369,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           actualVersion: result.actual,
         });
       } else {
-        recordIfNonEmpty(result.undoEntry);
+        recordIfNonEmpty(result.undoEntry, 'Text edit', sourceBefore);
         postDocumentState();
-        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -409,6 +382,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   async function handleEditRemove(msg: EditRemove): Promise<void> {
     try {
+      const sourceBefore = document.getText();
       const result = await applyRemoveCommit({
         document,
         currentVersion,
@@ -426,9 +400,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           actualVersion: result.actual,
         });
       } else {
-        recordIfNonEmpty(result.undoEntry);
+        recordIfNonEmpty(result.undoEntry, 'Remove element', sourceBefore);
         postDocumentState();
-        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -440,6 +413,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   async function handleEditBlockHtml(msg: EditBlockHtml): Promise<void> {
     try {
+      const sourceBefore = document.getText();
       const result = await applyBlockHtmlCommit({
         document,
         currentVersion,
@@ -458,9 +432,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           actualVersion: result.actual,
         });
       } else {
-        recordIfNonEmpty(result.undoEntry);
+        recordIfNonEmpty(result.undoEntry, 'Block HTML edit', sourceBefore);
         postDocumentState();
-        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -472,6 +445,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   async function handleEditBlockTag(msg: EditBlockTag): Promise<void> {
     try {
+      const sourceBefore = document.getText();
       const result = await applyBlockTagCommit({
         document,
         currentVersion,
@@ -489,9 +463,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           actualVersion: result.actual,
         });
       } else {
-        recordIfNonEmpty(result.undoEntry);
+        recordIfNonEmpty(result.undoEntry, 'Tag edit', sourceBefore);
         postDocumentState();
-        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -503,6 +476,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   async function handleEditElementAttrs(msg: EditElementAttrs): Promise<void> {
     try {
+      const sourceBefore = document.getText();
       const result = await applyAttrEditCommit({
         document,
         currentVersion,
@@ -521,11 +495,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
             expectedVersion: result.expected,
             actualVersion: result.actual,
           });
+        } else {
+          panel.webview.postMessage({
+            type: 'editFailed',
+            message:
+              'That CSS rule could not be saved. Finesse can currently save class-rule edits only when the rule lives in a <style> block in this file.',
+          });
+          postDocumentState();
         }
       } else {
-        recordIfNonEmpty(result.undoEntry);
+        recordIfNonEmpty(result.undoEntry, 'Attribute edit', sourceBefore);
         postDocumentState();
-        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -537,6 +517,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   async function handleEditCssDeclaration(msg: EditCssDeclaration): Promise<void> {
     try {
+      const sourceBefore = document.getText();
       const result = await applyCssDeclarationCommit({
         document,
         currentVersion,
@@ -556,9 +537,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           });
         }
       } else {
-        recordIfNonEmpty(result.undoEntry);
+        recordIfNonEmpty(result.undoEntry, 'CSS edit', sourceBefore);
         postDocumentState();
-        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -569,9 +549,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleUndoRequest(): Promise<void> {
-    const entry = undoStack.popUndo();
-    if (!entry) return;
+    const op = editHistory.beginUndo();
+    if (!op) return;
+    const entry = op.transaction;
     try {
+      if (hashText(document.getText()) !== entry.sourceHashAfter) {
+        op.abort();
+        editHistory.markExternalConflict('stale-replay');
+        panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+        postDocumentState();
+        return;
+      }
       const result = await applyRecordedSplices(
         document,
         entry.inverse,
@@ -582,26 +570,37 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       );
       if (!result.ok) {
         expectedSelfEditVersion = null;
-        undoStack.clear();
+        op.abort();
+        editHistory.markExternalConflict('stale-replay');
         panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+        postDocumentState();
         return;
       }
-      undoStack.pushRedo(entry);
+      op.commit();
       postDocumentState();
-      if (autoSave) await saveDocument({ mode: 'auto' });
     } catch (err) {
       expectedSelfEditVersion = null;
-      undoStack.clear();
+      op.abort();
+      editHistory.markExternalConflict('stale-replay');
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse undo failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+      postDocumentState();
     }
   }
 
   async function handleRedoRequest(): Promise<void> {
-    const entry = undoStack.popRedo();
-    if (!entry) return;
+    const op = editHistory.beginRedo();
+    if (!op) return;
+    const entry = op.transaction;
     try {
+      if (hashText(document.getText()) !== entry.sourceHashBefore) {
+        op.abort();
+        editHistory.markExternalConflict('stale-replay');
+        panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+        postDocumentState();
+        return;
+      }
       const result = await applyRecordedSplices(
         document,
         entry.forward,
@@ -612,19 +611,22 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       );
       if (!result.ok) {
         expectedSelfEditVersion = null;
-        undoStack.clear();
+        op.abort();
+        editHistory.markExternalConflict('stale-replay');
         panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+        postDocumentState();
         return;
       }
-      undoStack.pushUndo(entry);
+      op.commit();
       postDocumentState();
-      if (autoSave) await saveDocument({ mode: 'auto' });
     } catch (err) {
       expectedSelfEditVersion = null;
-      undoStack.clear();
+      op.abort();
+      editHistory.markExternalConflict('stale-replay');
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse redo failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+      postDocumentState();
     }
   }
 
@@ -754,9 +756,9 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         }
         panel.webview.postMessage(fm);
       } else {
-        // External edit invalidates the recorded splice offsets — wipe both
-        // branches so a stale undo can't corrupt the doc.
-        undoStack.clear();
+        // External edits invalidate recorded splice offsets. Keep the history
+        // present but disabled so stale undo/redo cannot replay into new text.
+        editHistory.markExternalConflict('external-document-change');
         currentAgentSelection = null;
         if (currentOffsetMap) panel.webview.postMessage(currentOffsetMap);
         panel.webview.postMessage(fm);
@@ -822,11 +824,13 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
       #status .selection { max-width: 220px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
       #status .dirty-dot { color: #e2a04a; font-size: 13px; line-height: 1; opacity: 0; transition: opacity 100ms ease-out; }
       #status .dirty-dot.is-dirty { opacity: 1; }
+      #status .save-state { font-weight: 600; opacity: 0.72; }
+      #status .save-state.is-dirty { color: var(--vscode-inputValidation-warningForeground, #f0c674); opacity: 1; }
       #status button.tool { font: inherit; font-size: 11px; background: transparent; color: inherit; border: 1px solid var(--vscode-panel-border); border-radius: 2px; padding: 1px 8px; cursor: pointer; opacity: 0.85; }
-	      #status button.tool:hover:not(:disabled) { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06)); }
-	      #status button.tool:disabled { opacity: 0.4; cursor: default; }
-	      #status label.toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; opacity: 0.85; }
-	      #status label.toggle input { margin: 0; }
+		      #status button.tool:hover:not(:disabled) { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06)); }
+      #status button.tool.primary:not(:disabled) { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: var(--vscode-button-background); opacity: 1; font-weight: 600; }
+      #status button.tool.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); border-color: var(--vscode-button-hoverBackground); }
+		      #status button.tool:disabled { opacity: 0.4; cursor: default; }
 	      #banners { display: flex; flex-direction: column; }
       .banner { padding: 8px 12px; font-size: 13px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--vscode-panel-border); }
       .banner-warn { background: var(--vscode-inputValidation-warningBackground); color: var(--vscode-inputValidation-warningForeground); }
@@ -859,13 +863,10 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
       <span id="status-file" class="muted">no file</span>
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
-	      <span id="status-locked" class="muted" hidden>editing locked</span>
-	      <span id="status-selection" class="muted selection" hidden>no selection</span>
-	      <span class="grow"></span>
-	      <label class="toggle" title="Save automatically after each edit">
-        <input id="status-autosave" type="checkbox" />
-        <span>Auto-save</span>
-      </label>
+		      <span id="status-locked" class="muted" hidden>editing locked</span>
+		      <span id="status-selection" class="muted selection" hidden>no selection</span>
+		      <span id="status-save-state" class="save-state">Saved</span>
+		      <span class="grow"></span>
       <button id="status-discard" class="tool" type="button" title="Discard unsaved changes" disabled>Discard</button>
       <button id="status-undo" class="tool" type="button" title="Undo Finesse edit (⌘Z)" disabled>Undo</button>
       <button id="status-redo" class="tool" type="button" title="Redo Finesse edit (⇧⌘Z)" disabled>Redo</button>

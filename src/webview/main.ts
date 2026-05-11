@@ -4,17 +4,21 @@ import type {
   HostMessage,
   IframeMessage,
   PanelCssEdit,
+  PanelSelectElement,
   PanelStyleEdit,
   WebviewActionMessage,
 } from '../shared/protocol';
 import { setupSidePanel, type SidePanelController } from './stylePanel';
 import { setupAgentPanel, type AgentPanelController } from './agentPanel';
 import {
+  dismissUnsavedChangesBanner,
   dismissAll,
   initBanners,
+  showEditFailedBanner,
   showRuntimeErrorBanner,
   showStaleReloadBanner,
   showTemplatedBanner,
+  showUnsavedChangesBanner,
 } from './banners';
 import { initStatus, updateStatus } from './status';
 
@@ -42,6 +46,7 @@ const init = window.__FINESSE_INIT__;
 
 const banners = document.getElementById('banners');
 if (banners) initBanners(banners);
+let currentDirty = false;
 
 if (!init) {
   showRuntimeErrorBanner('init data missing (window.__FINESSE_INIT__)');
@@ -53,7 +58,6 @@ if (!init) {
       port: init.port,
       locked: init.fileMeta.isTemplated,
       isDirty: false,
-      autoSave: true,
       canUndo: false,
       canRedo: false,
       selectedLabel: undefined,
@@ -62,7 +66,6 @@ if (!init) {
     {
       onSave: requestSave,
       onDiscard: requestDiscard,
-      onToggleAutoSave: (next) => requestSetAutoSave(next),
       onUndo: requestUndo,
       onRedo: requestRedo,
     },
@@ -87,10 +90,6 @@ function requestSave(): void {
 
 function requestDiscard(): void {
   post({ type: '__webview_action', action: 'discard' });
-}
-
-function requestSetAutoSave(value: boolean): void {
-  post({ type: '__webview_action', action: 'setAutoSave', value });
 }
 
 function requestUndo(): void {
@@ -126,7 +125,7 @@ function bootIframe(init: InitData): void {
     sidePanel = setupSidePanel({
       host: dock,
       sender: {
-        toIframe(msg: PanelStyleEdit | PanelCssEdit) {
+        toIframe(msg: PanelStyleEdit | PanelCssEdit | PanelSelectElement) {
           postToIframe(msg);
         },
       },
@@ -197,6 +196,9 @@ function bootIframe(init: InitData): void {
       case 'staleCommit':
         relayToIframe(data);
         break;
+      case 'editFailed':
+        showEditFailedBanner(data.message);
+        break;
       case 'fileMeta':
         updateStatus({ locked: data.isTemplated });
         sidePanel?.setLocked(data.isTemplated);
@@ -204,16 +206,18 @@ function bootIframe(init: InitData): void {
           showTemplatedBanner({ onEditAnyway: requestEditAnyway });
         } else {
           dismissAll();
+          syncUnsavedReminder();
         }
         relayToIframe(data);
         break;
       case 'documentState':
+        currentDirty = data.isDirty;
         updateStatus({
           isDirty: data.isDirty,
-          autoSave: data.autoSave,
           canUndo: data.canUndo,
           canRedo: data.canRedo,
         });
+        syncUnsavedReminder();
         break;
       case 'agentSelectionState':
         updateStatus({
@@ -252,6 +256,14 @@ function bootIframe(init: InitData): void {
         }
         break;
     }
+  }
+}
+
+function syncUnsavedReminder(): void {
+  if (currentDirty) {
+    showUnsavedChangesBanner({ onSave: requestSave });
+  } else {
+    dismissUnsavedChangesBanner();
   }
 }
 
@@ -310,6 +322,7 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'editAck' ||
     t === 'reload' ||
     t === 'staleCommit' ||
+    t === 'editFailed' ||
     t === 'fileMeta' ||
     t === 'documentState' ||
     t === 'agentSelectionState' ||

@@ -44,6 +44,14 @@
       #status .dirty-dot.is-dirty {
         opacity: 1;
       }
+      #status .save-state {
+        font-weight: 600;
+        opacity: 0.72;
+      }
+      #status .save-state.is-dirty {
+        color: var(--vscode-inputValidation-warningForeground, #f0c674);
+        opacity: 1;
+      }
       #status button.tool {
         font: inherit;
         font-size: 11px;
@@ -59,20 +67,20 @@
         opacity: 1;
         background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.06));
       }
+      #status button.tool.primary:not(:disabled) {
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        border-color: var(--vscode-button-background);
+        opacity: 1;
+        font-weight: 600;
+      }
+      #status button.tool.primary:hover:not(:disabled) {
+        background: var(--vscode-button-hoverBackground);
+        border-color: var(--vscode-button-hoverBackground);
+      }
       #status button.tool:disabled {
         opacity: 0.4;
         cursor: default;
-      }
-      #status label.toggle {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        cursor: pointer;
-        user-select: none;
-        opacity: 0.85;
-      }
-      #status label.toggle input {
-        margin: 0;
       }
       #banners {
         display: flex;
@@ -133,11 +141,8 @@
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
       <span id="status-locked" class="muted" hidden>editing locked</span>
+      <span id="status-save-state" class="save-state">Saved</span>
       <span class="grow"></span>
-      <label class="toggle" title="Save automatically after each edit">
-        <input id="status-autosave" type="checkbox" />
-        <span>Auto-save</span>
-      </label>
       <button
         id="status-discard"
         class="tool"

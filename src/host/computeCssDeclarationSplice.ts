@@ -3,12 +3,12 @@
  * block in the HTML source.
  *
  * Scope (v1):
- *   - Only top-level rules whose selector text trims to exactly `.className`
- *     are considered. `.foo:hover`, `.foo .bar`, and at-rule-nested rules are
- *     deliberately ignored — the side panel hides controls for those.
+ *   - Only top-level rules are considered. Selectors may be contextual
+ *     (`.hero .lede`, `.card > .title`, selector lists, etc.) as long as the
+ *     selector reported by the browser can be matched back to source.
  *   - All `<style>` blocks in the document are searched; first matching rule
  *     wins. If multiple rules with the same selector exist we edit the first.
- *   - Strings (`"…"`, `'…'`) and `/* … *​/` comments are skipped during
+ *   - Strings (`"..."`, `'...'`) and block comments are skipped during
  *     tokenisation so a `:` or `;` inside them doesn't confuse parsing.
  *
  * Edit semantics:
@@ -121,7 +121,7 @@ function findStyleBlocks(source: string): StyleBlock[] {
 // ── Tokenisation helpers ─────────────────────────────────────────────────
 
 /**
- * Advance `i` past any whitespace, `/* … *​/` comments, or string literals
+ * Advance `i` past any whitespace, block comments, or string literals
  * starting at `i`. Returns the new index. If `i` doesn't sit on one of those
  * tokens, returns `i` unchanged.
  */
@@ -219,7 +219,7 @@ function locateTopLevelRule(
     const bodyStart = brace + 1;
     const bodyEnd = findMatchingClose(source, bodyStart, end);
     if (bodyEnd < 0) return null;
-    if (selectorText === selector) {
+    if (selectorsEquivalent(selectorText, selector)) {
       return { selectorStart, selectorEnd: brace, bodyStart, bodyEnd };
     }
     i = bodyEnd + 1;
@@ -352,4 +352,126 @@ function trailingIndent(source: string, bodyEnd: number): string {
   let j = i + 1;
   while (j < bodyEnd && (source[j] === ' ' || source[j] === '\t')) j++;
   return source.slice(i + 1, j);
+}
+
+function selectorsEquivalent(a: string, b: string): boolean {
+  return normaliseSelectorList(a) === normaliseSelectorList(b);
+}
+
+function normaliseSelectorList(selectorText: string): string {
+  return splitSelectorList(selectorText).map(normaliseSelector).join(',');
+}
+
+function normaliseSelector(selector: string): string {
+  let out = '';
+  let quote: string | null = null;
+  let bracketDepth = 0;
+  let parenDepth = 0;
+  let pendingSpace = false;
+  for (let i = 0; i < selector.length; i++) {
+    const ch = selector[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') {
+        i++;
+        if (i < selector.length) out += selector[i];
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      if (pendingSpace && shouldKeepSelectorSpace(out, ch)) out += ' ';
+      pendingSpace = false;
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '[') {
+      if (pendingSpace && shouldKeepSelectorSpace(out, ch)) out += ' ';
+      pendingSpace = false;
+      bracketDepth++;
+      out += ch;
+      continue;
+    }
+    if (ch === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      pendingSpace = false;
+      out += ch;
+      continue;
+    }
+    if (ch === '(') {
+      if (pendingSpace && shouldKeepSelectorSpace(out, ch)) out += ' ';
+      pendingSpace = false;
+      parenDepth++;
+      out += ch;
+      continue;
+    }
+    if (ch === ')') {
+      parenDepth = Math.max(0, parenDepth - 1);
+      pendingSpace = false;
+      out += ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      pendingSpace = true;
+      continue;
+    }
+    if (isCombinator(ch) && bracketDepth === 0 && parenDepth === 0) {
+      out = out.replace(/\s+$/, '');
+      pendingSpace = false;
+      out += ch;
+      continue;
+    }
+    if (pendingSpace && shouldKeepSelectorSpace(out, ch)) out += ' ';
+    pendingSpace = false;
+    out += ch;
+  }
+  return out.trim();
+}
+
+function shouldKeepSelectorSpace(out: string, next: string): boolean {
+  if (!out) return false;
+  const prev = out[out.length - 1];
+  if (isCombinator(prev) || isCombinator(next) || next === ',' || prev === ',') return false;
+  return true;
+}
+
+function isCombinator(ch: string): boolean {
+  return ch === '>' || ch === '+' || ch === '~';
+}
+
+function splitSelectorList(selectorText: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let bracketDepth = 0;
+  let parenDepth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < selectorText.length; i++) {
+    const ch = selectorText[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '[') bracketDepth++;
+    else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+    else if (ch === ',' && bracketDepth === 0 && parenDepth === 0) {
+      const item = selectorText.slice(start, i).trim();
+      if (item) out.push(item);
+      start = i + 1;
+    }
+  }
+  const tail = selectorText.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
 }
