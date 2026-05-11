@@ -229,6 +229,13 @@ export interface ElementStyleSnapshot {
   };
 }
 
+export interface ClassRuleDeclaration {
+  property: string;
+  value: string;
+  /** Whether the declaration ends with `!important`. */
+  important: boolean;
+}
+
 export type ElementSelectionSnapshot = {
   documentVersion: number;
   elementId: number;
@@ -236,6 +243,22 @@ export type ElementSelectionSnapshot = {
   tagName: string;
   domPath: string;
   selectorHints: string[];
+  /** Tokens from this element's `class` attribute, in source order. */
+  classList: string[];
+  /**
+   * Sorted, deduped union of every class token used anywhere in the document.
+   * Drives the side panel's class autocomplete — we only suggest classes the
+   * file already references (i.e. ones likely to have CSS attached).
+   */
+  classCatalog: string[];
+  /**
+   * For each class on this element, the CSS declarations defined by the
+   * top-level rule(s) whose selector is exactly `.className`. Declarations
+   * appear in source order; later declarations of the same property override
+   * earlier ones (we still surface both so the user can edit either).
+   * Classes with no matching rule simply don't appear as keys.
+   */
+  classRules: Record<string, ClassRuleDeclaration[]>;
   textPreview: string;
   outerHtmlPreview: string;
   rect: {
@@ -253,6 +276,20 @@ export type ElementSelectionChanged = {
   selection: ElementSelectionSnapshot | null;
 };
 
+/**
+ * Edit a single CSS declaration inside a `<style>` block in the same source
+ * file. Used by the per-class sections in the side panel. Routed through the
+ * iframe so the chrome doesn't have to talk directly to the host.
+ */
+export type EditCssDeclaration = {
+  type: 'editCssDeclaration';
+  documentVersion: number;
+  selector: string;
+  property: string;
+  /** `null` removes the declaration entirely. */
+  value: string | null;
+};
+
 export type IframeMessage =
   | EditCommit
   | EditCancel
@@ -260,6 +297,7 @@ export type IframeMessage =
   | EditBlockHtml
   | EditBlockTag
   | EditElementAttrs
+  | EditCssDeclaration
   | RuntimeError
   | Ready
   | SaveRequest
@@ -282,7 +320,21 @@ export type PanelStyleEdit = {
   attrs: Record<string, string | null>;
 };
 
-export type ChromeIframeMessage = PanelStyleEdit;
+/**
+ * Chrome asks the iframe to apply a CSS declaration edit. The iframe updates
+ * its live CSSOM optimistically (so the preview reflects the change before the
+ * host responds) and forwards an {@link EditCssDeclaration} to the host to
+ * splice the source file.
+ */
+export type PanelCssEdit = {
+  type: 'panelCssEdit';
+  documentVersion: number;
+  selector: string;
+  property: string;
+  value: string | null;
+};
+
+export type ChromeIframeMessage = PanelStyleEdit | PanelCssEdit;
 
 /** Everything the iframe's window-message listener may receive. */
 export type IframeInboundMessage = HostMessage | ChromeIframeMessage;

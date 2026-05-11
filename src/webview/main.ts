@@ -3,6 +3,7 @@ import type {
   FileMeta,
   HostMessage,
   IframeMessage,
+  PanelCssEdit,
   PanelStyleEdit,
   WebviewActionMessage,
 } from '../shared/protocol';
@@ -125,7 +126,7 @@ function bootIframe(init: InitData): void {
     sidePanel = setupSidePanel({
       host: dock,
       sender: {
-        toIframe(msg: PanelStyleEdit) {
+        toIframe(msg: PanelStyleEdit | PanelCssEdit) {
           postToIframe(msg);
         },
       },

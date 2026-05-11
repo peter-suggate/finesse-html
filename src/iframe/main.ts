@@ -117,6 +117,15 @@ function setupHostMessageListener(session: EditSession): void {
         if (el) session.applyStyleEdit(el, data.attrs);
         break;
       }
+      case 'panelCssEdit': {
+        session.applyCssDeclarationEdit({
+          documentVersion: data.documentVersion,
+          selector: data.selector,
+          property: data.property,
+          value: data.value,
+        });
+        break;
+      }
     }
   });
 }

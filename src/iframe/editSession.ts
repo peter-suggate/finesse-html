@@ -1,4 +1,5 @@
 import type {
+  ClassRuleDeclaration,
   ElementSelectionSnapshot,
   ElementStyleSnapshot,
   FileMeta,
@@ -123,6 +124,17 @@ export interface EditSession {
    * dispatch (or queued dispatch) occurred.
    */
   applyStyleEdit(el: HTMLElement, attrs: Record<string, string | null>): boolean;
+  /**
+   * Apply a CSS declaration edit to a class rule. Updates the live CSSOM
+   * optimistically (so the preview reflects immediately) and forwards an
+   * {@link IframeMessage} to the host to splice the source file.
+   */
+  applyCssDeclarationEdit(input: {
+    documentVersion: number;
+    selector: string;
+    property: string;
+    value: string | null;
+  }): boolean;
   /**
    * Stage a tag rename for the active block. Applied atomically with any
    * inner edit on the next commit. Pass null to clear.
@@ -585,6 +597,12 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       tagName: element.tagName || el.tagName.toLowerCase(),
       domPath: domPathFor(el),
       selectorHints: selectorHintsFor(el),
+      classList: classTokens(el),
+      classCatalog: collectDocumentClassCatalog(el.ownerDocument ?? document),
+      classRules: collectClassRules(
+        el.ownerDocument ?? document,
+        classTokens(el),
+      ),
       textPreview: limit(el.innerText || el.textContent || '', 500),
       outerHtmlPreview: limit(el.outerHTML, 4000),
       rect: {
@@ -680,6 +698,28 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     return sendAttrEditCommit(el, attrs);
   }
 
+  function applyCssDeclarationEdit(input: {
+    documentVersion: number;
+    selector: string;
+    property: string;
+    value: string | null;
+  }): boolean {
+    if (isLocked()) return false;
+    if (!offsetMap) return false;
+    // Optimistic CSSOM update: find the first top-level rule matching the
+    // selector and apply the property change so the preview reflects it
+    // before the host responds.
+    applyCssOptimistic(document, input.selector, input.property, input.value);
+    opts.postToParent({
+      type: 'editCssDeclaration',
+      documentVersion: input.documentVersion,
+      selector: input.selector,
+      property: input.property,
+      value: input.value,
+    });
+    return true;
+  }
+
   function findElementById(elementId: number): HTMLElement | null {
     return elementIdToElement.get(elementId) ?? null;
   }
@@ -731,6 +771,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     onSelectionChange,
     findElementById,
     applyStyleEdit,
+    applyCssDeclarationEdit,
   };
 }
 
@@ -768,6 +809,137 @@ function limit(value: string, max: number): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   if (normalized.length <= max) return normalized;
   return `${normalized.slice(0, max - 1)}...`;
+}
+
+function classTokens(el: HTMLElement): string[] {
+  const raw = el.getAttribute('class');
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of raw.split(/\s+/)) {
+    if (!tok || seen.has(tok)) continue;
+    seen.add(tok);
+    out.push(tok);
+  }
+  return out;
+}
+
+/**
+ * Gather every class token referenced by an element in the document. Used as
+ * the autocomplete pool for the side panel — limiting suggestions to classes
+ * the file already uses keeps them aligned with the project's CSS.
+ */
+function collectDocumentClassCatalog(doc: Document): string[] {
+  const seen = new Set<string>();
+  const all = doc.querySelectorAll('[class]');
+  for (let i = 0; i < all.length; i++) {
+    const cls = all[i].getAttribute('class');
+    if (!cls) continue;
+    for (const tok of cls.split(/\s+/)) {
+      if (tok) seen.add(tok);
+    }
+  }
+  return Array.from(seen).sort();
+}
+
+/**
+ * Walk `document.styleSheets` and collect declarations for top-level rules
+ * whose selector is exactly `.className`. Conservative on purpose for v1:
+ *
+ *   - skip rules nested inside @media / @supports / @keyframes
+ *   - skip rules whose selector list contains anything other than `.cls`
+ *     (e.g. `.cls:hover`, `.cls .other`, `.cls, .other` — none of these are
+ *     editable through this section yet)
+ *   - skip cross-origin stylesheets (accessing `.cssRules` throws)
+ *
+ * Rules from `<style>` blocks in the same document pass through fine; that's
+ * the primary supported case.
+ */
+function collectClassRules(
+  doc: Document,
+  classes: string[],
+): Record<string, ClassRuleDeclaration[]> {
+  if (classes.length === 0) return {};
+  const wanted = new Set(classes);
+  const out: Record<string, ClassRuleDeclaration[]> = {};
+  for (const sheet of Array.from(doc.styleSheets)) {
+    let rules: CSSRuleList;
+    try {
+      rules = (sheet as CSSStyleSheet).cssRules;
+    } catch {
+      continue; // cross-origin
+    }
+    for (let i = 0; i < rules.length; i++) {
+      const rule = rules[i];
+      if (rule.type !== CSSRule.STYLE_RULE) continue;
+      const styleRule = rule as CSSStyleRule;
+      const cls = singleClassSelector(styleRule.selectorText);
+      if (!cls || !wanted.has(cls)) continue;
+      const decls = declarationsFromRule(styleRule);
+      if (decls.length === 0) continue;
+      const bucket = out[cls] ?? (out[cls] = []);
+      bucket.push(...decls);
+    }
+  }
+  return out;
+}
+
+/**
+ * Return the class name if the selector is a single class with no
+ * combinators / pseudos / attribute parts. Otherwise null.
+ */
+function singleClassSelector(selectorText: string): string | null {
+  const trimmed = selectorText.trim();
+  const m = /^\.([A-Za-z_][\w-]*)$/.exec(trimmed);
+  return m ? m[1] : null;
+}
+
+/**
+ * Apply a property change to the first top-level rule in the document's
+ * stylesheets whose selector is exactly `selector`. Used for optimistic
+ * preview updates ahead of the host commit. Silently no-ops if no rule
+ * matches or the stylesheet is cross-origin.
+ */
+function applyCssOptimistic(
+  doc: Document,
+  selector: string,
+  property: string,
+  value: string | null,
+): void {
+  for (const sheet of Array.from(doc.styleSheets)) {
+    let rules: CSSRuleList;
+    try {
+      rules = (sheet as CSSStyleSheet).cssRules;
+    } catch {
+      continue;
+    }
+    for (let i = 0; i < rules.length; i++) {
+      const rule = rules[i];
+      if (rule.type !== CSSRule.STYLE_RULE) continue;
+      const styleRule = rule as CSSStyleRule;
+      if (styleRule.selectorText.trim() !== selector) continue;
+      if (value === null) styleRule.style.removeProperty(property);
+      else styleRule.style.setProperty(property, value);
+      return;
+    }
+  }
+}
+
+function declarationsFromRule(rule: CSSStyleRule): ClassRuleDeclaration[] {
+  const out: ClassRuleDeclaration[] = [];
+  const style = rule.style;
+  for (let i = 0; i < style.length; i++) {
+    const property = style.item(i);
+    if (!property) continue;
+    const value = style.getPropertyValue(property).trim();
+    if (!value) continue;
+    out.push({
+      property,
+      value,
+      important: style.getPropertyPriority(property) === 'important',
+    });
+  }
+  return out;
 }
 
 function selectorHintsFor(el: HTMLElement): string[] {

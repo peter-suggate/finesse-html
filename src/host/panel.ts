@@ -9,6 +9,7 @@ import type {
   EditBlockTag,
   EditCommit,
   EditCancel,
+  EditCssDeclaration,
   EditElementAttrs,
   EditRemove,
   ElementSelectionChanged,
@@ -27,6 +28,7 @@ import {
   applyAttrEditCommit,
   applyBlockHtmlCommit,
   applyBlockTagCommit,
+  applyCssDeclarationCommit,
   applyEditCommit,
   applyRecordedSplices,
   applyRemoveCommit,
@@ -213,34 +215,36 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function saveDocumentWithoutFormatting(): Promise<void> {
-    if (await trySaveWithoutFormattingForUri()) return;
-    if (await trySaveWithoutFormattingViaEditor()) return;
-    await document.save();
+    if (await trySaveWithoutFormattingInActiveEditor()) return;
+    await saveDocumentWithoutFocus();
   }
 
-  async function trySaveWithoutFormattingForUri(): Promise<boolean> {
+  async function trySaveWithoutFormattingInActiveEditor(): Promise<boolean> {
+    if (vscode.window.activeTextEditor?.document.uri.toString() !== document.uri.toString()) {
+      return false;
+    }
     try {
-      await vscode.commands.executeCommand(
-        'workbench.action.files.saveWithoutFormatting',
-        document.uri,
-      );
+      await vscode.commands.executeCommand('workbench.action.files.saveWithoutFormatting');
       return !document.isDirty;
     } catch {
       return false;
     }
   }
 
-  async function trySaveWithoutFormattingViaEditor(): Promise<boolean> {
+  async function saveDocumentWithoutFocus(): Promise<void> {
+    const expectedFormattingVersion = document.version + 1;
     try {
-      await vscode.window.showTextDocument(document, {
-        preview: false,
-      });
-      await vscode.commands.executeCommand('workbench.action.files.saveWithoutFormatting');
-      return !document.isDirty;
-    } catch {
-      return false;
+      // VS Code's save-without-formatting command is active-editor scoped.
+      // When the preview webview is active, opening the source editor just to
+      // run it steals the user's editor slot. Save by URI instead so autosave
+      // persists the backing document without changing focus or layout.
+      expectedSelfEditVersion = expectedFormattingVersion;
+      const saved = await vscode.workspace.save(document.uri);
+      if (!saved) await document.save();
     } finally {
-      panel.reveal(vscode.ViewColumn.Beside, true);
+      if (expectedSelfEditVersion === expectedFormattingVersion) {
+        expectedSelfEditVersion = null;
+      }
     }
   }
 
@@ -326,6 +330,9 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         return;
       case 'editElementAttrs':
         await handleEditElementAttrs(msg);
+        return;
+      case 'editCssDeclaration':
+        await handleEditCssDeclaration(msg);
         return;
       case 'editCancel':
         handleEditCancel(msg);
@@ -524,6 +531,39 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse attribute edit failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  async function handleEditCssDeclaration(msg: EditCssDeclaration): Promise<void> {
+    try {
+      const result = await applyCssDeclarationCommit({
+        document,
+        currentVersion,
+        commit: msg,
+        beforeApply: (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+        escapeReplacement,
+      });
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        if (result.reason === 'stale') {
+          panel.webview.postMessage({
+            type: 'staleCommit',
+            expectedVersion: result.expected,
+            actualVersion: result.actual,
+          });
+        }
+      } else {
+        recordIfNonEmpty(result.undoEntry);
+        postDocumentState();
+        if (autoSave) await saveDocument({ mode: 'auto' });
+      }
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`Finesse CSS edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }

@@ -16,6 +16,7 @@
 
 import type {
   ElementSelectionSnapshot,
+  PanelCssEdit,
   PanelStyleEdit,
 } from '../../shared/protocol';
 import {
@@ -34,10 +35,17 @@ import {
   spacingSection,
   type SectionHandle,
 } from './sections';
+import {
+  classesSection,
+  classRuleSections,
+  type ClassRuleCommitFn,
+  type ClassRuleSectionsHandle,
+  type ClassesSectionHandle,
+} from './classesPanel';
 
 export interface StylePanelSender {
-  /** Post a PanelStyleEdit message into the user iframe. */
-  toIframe(msg: PanelStyleEdit): void;
+  /** Post a chrome→iframe message (style or CSS-class edit) into the iframe. */
+  toIframe(msg: PanelStyleEdit | PanelCssEdit): void;
 }
 
 export interface SetupSidePanelOpts {
@@ -107,6 +115,9 @@ export function setupSidePanel(opts: SetupSidePanelOpts): SidePanelController {
     syncSections(after);
   }
 
+  const classes: ClassesSectionHandle = classesSection(commit);
+  body.appendChild(classes.root);
+
   const sections: SectionHandle[] = [
     layoutSection(commit),
     spacingSection(commit),
@@ -116,17 +127,35 @@ export function setupSidePanel(opts: SetupSidePanelOpts): SidePanelController {
     gridSection(commit),
   ];
   for (const s of sections) body.appendChild(s.root);
+
+  const commitCssDeclaration: ClassRuleCommitFn = (selector, property, value) => {
+    if (!currentSelection || locked) return;
+    sender.toIframe({
+      type: 'panelCssEdit',
+      documentVersion: currentSelection.documentVersion,
+      selector,
+      property,
+      value,
+    });
+  };
+  const classRules: ClassRuleSectionsHandle = classRuleSections(commitCssDeclaration);
+  body.appendChild(classRules.root);
+
   body.appendChild(empty);
 
   function syncSections(localOverride?: StyleMap): void {
     if (!currentSelection) {
       empty.hidden = false;
+      classes.root.style.display = 'none';
+      classRules.root.style.display = 'none';
       for (const s of sections) s.root.style.display = 'none';
       tagBadge.textContent = '—';
       meta.textContent = locked ? 'Locked' : 'No selection';
       return;
     }
     empty.hidden = true;
+    classes.root.style.display = '';
+    classRules.root.style.display = '';
     const styles = currentSelection.styles;
     const computedDisplay = styles.computed.display;
     // If we have local overrides (mid-edit), prefer them over the snapshot's
@@ -159,6 +188,10 @@ export function setupSidePanel(opts: SetupSidePanelOpts): SidePanelController {
   function setSelection(selection: ElementSelectionSnapshot | null): void {
     currentSelection = selection;
     workingMap = parseStyleAttr(selection?.styles.inlineStyle ?? null);
+    if (selection) {
+      classes.sync(selection.classList, selection.classCatalog);
+      classRules.sync(selection.classList, selection.classRules);
+    }
     syncSections();
   }
 
@@ -514,5 +547,185 @@ const SP_CSS = `
   background: var(--vscode-inputValidation-warningBackground, rgba(255, 200, 0, 0.06));
   color: var(--vscode-inputValidation-warningForeground, inherit);
   opacity: 0.85;
+}
+
+.sp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 22px;
+}
+.sp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 2px 1px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--vscode-textLink-foreground, #4cb6ff);
+  background: var(--vscode-badge-background, rgba(76, 182, 255, 0.14));
+  border: 1px solid var(--vscode-input-border, rgba(76, 182, 255, 0.25));
+  border-radius: 10px;
+  max-width: 100%;
+  min-width: 0;
+}
+.sp-chip-label {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sp-chip-remove {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px;
+  opacity: 0.6;
+  border-radius: 50%;
+}
+.sp-chip-remove:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
+}
+.sp-chips-empty {
+  font-size: 11px;
+  opacity: 0.45;
+  font-style: italic;
+}
+.sp-class-add {
+  margin-top: 2px;
+  position: relative;
+}
+.sp-class-input {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11.5px;
+}
+.sp-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 2px);
+  z-index: 20;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--vscode-quickInput-background, var(--vscode-editor-background, #1e1e1e));
+  color: var(--vscode-quickInput-foreground, var(--vscode-foreground, inherit));
+  border: 1px solid var(--vscode-focusBorder, var(--vscode-input-border, rgba(128,128,128,0.4)));
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+.sp-dropdown::-webkit-scrollbar { width: 8px; }
+.sp-dropdown::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(128,128,128,0.4));
+  border-radius: 4px;
+}
+.sp-dropdown::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, rgba(128,128,128,0.55));
+}
+.sp-dropdown-item {
+  padding: 3px 8px;
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sp-dropdown-item[data-active="true"] {
+  background: var(--vscode-list-activeSelectionBackground, rgba(76, 182, 255, 0.18));
+  color: var(--vscode-list-activeSelectionForeground, inherit);
+}
+
+.sp-classrules { display: block; }
+.sp-classrule-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sp-classrule-title {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  color: var(--vscode-textLink-foreground, #4cb6ff);
+  text-transform: none;
+  letter-spacing: 0;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sp-classrule-count {
+  font-size: 10px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+.sp-classrule-content {
+  gap: 4px;
+}
+.sp-classrule-empty {
+  font-size: 11px;
+  opacity: 0.55;
+  font-style: italic;
+  padding: 2px 0;
+}
+.sp-decl-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 18px;
+  align-items: center;
+  gap: 6px;
+}
+.sp-decl-prop {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sp-decl-value {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+}
+.sp-decl-remove {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.45;
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+}
+.sp-decl-remove:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
+}
+.sp-decl-add {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,0.18));
+}
+.sp-decl-add-prop,
+.sp-decl-add-value {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+}
+.sp-decl-add-prop::placeholder,
+.sp-decl-add-value::placeholder {
+  opacity: 0.4;
 }
 `;

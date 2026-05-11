@@ -3,6 +3,7 @@ import type {
   EditBlockHtml,
   EditBlockTag,
   EditCommit,
+  EditCssDeclaration,
   EditElementAttrs,
   EditRemove,
   OffsetMap,
@@ -13,6 +14,7 @@ import {
 } from './blockTagTransform';
 import { computeBlockHtmlSplices } from './computeBlockHtmlSplices';
 import { computeAttrEditSplices } from './computeAttrEditSplices';
+import { computeCssDeclarationSplice } from './computeCssDeclarationSplice';
 import {
   computeInverseSplices,
   type SpliceOp,
@@ -68,6 +70,14 @@ export interface ApplyAttrEditOpts {
   currentVersion: number;
   currentOffsetMap: OffsetMap | null;
   commit: EditElementAttrs;
+  beforeApply: (expectedVersion: number) => void;
+  escapeReplacement?: ReplacementEscaper;
+}
+
+export interface ApplyCssDeclarationOpts {
+  document: vscode.TextDocument;
+  currentVersion: number;
+  commit: EditCssDeclaration;
   beforeApply: (expectedVersion: number) => void;
   escapeReplacement?: ReplacementEscaper;
 }
@@ -430,6 +440,53 @@ export async function applyAttrEditCommit(opts: ApplyAttrEditOpts): Promise<Appl
     attrs: commit.attrs,
   });
   if (!result.ok) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+
+  const escape = opts.escapeReplacement ?? identity;
+  const splices: SpliceOp[] = result.splices.map((op) => ({
+    startOffset: op.startOffset,
+    endOffset: op.endOffset,
+    replacement: escape(op.replacement),
+  }));
+
+  if (splices.length === 0) {
+    return { ok: true, newVersion: currentVersion, undoEntry: emptyUndoEntry(currentVersion) };
+  }
+
+  const applied = await applySplicesWithInverse(document, splices, opts.beforeApply);
+  if (!applied.ok) return applied;
+  return { ok: true, newVersion: document.version, undoEntry: applied.entry };
+}
+
+export async function applyCssDeclarationCommit(
+  opts: ApplyCssDeclarationOpts,
+): Promise<ApplyEditResult> {
+  const { document, currentVersion, commit } = opts;
+  if (commit.documentVersion !== currentVersion || document.version !== currentVersion) {
+    return {
+      ok: false,
+      reason: 'stale',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+
+  const result = computeCssDeclarationSplice({
+    source: document.getText(),
+    selector: commit.selector,
+    property: commit.property,
+    value: commit.value,
+  });
+  if (!result.ok) {
+    if (result.reason === 'no-op') {
+      return { ok: true, newVersion: currentVersion, undoEntry: emptyUndoEntry(currentVersion) };
+    }
     return {
       ok: false,
       reason: 'apply-failed',
