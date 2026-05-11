@@ -58,22 +58,28 @@ export function setupOverlay(opts: OverlayOpts): void {
 
   let hoveredEl: HTMLElement | null = null;
   let focusedEl: HTMLElement | null = null;
+  let selectedEl: HTMLElement | null = null;
+  let nativeClickBypass = false;
 
   function rectOf(el: HTMLElement): DOMRect {
     return el.getBoundingClientRect();
   }
 
   function deleteTargetEl(): HTMLElement | null {
-    return hoveredEl ?? focusedEl;
+    return selectedEl ?? hoveredEl ?? focusedEl;
   }
 
   function refreshDeleteButton(): void {
-    if (session.hasActiveBlock() || session.isLocked()) {
+    if (session.isLocked()) {
       deleteBtn.style.display = 'none';
       return;
     }
     const el = deleteTargetEl();
     if (!el) {
+      deleteBtn.style.display = 'none';
+      return;
+    }
+    if (el !== selectedEl && isInteractiveClickTarget(el)) {
       deleteBtn.style.display = 'none';
       return;
     }
@@ -93,15 +99,27 @@ export function setupOverlay(opts: OverlayOpts): void {
     refreshDeleteButton();
   }
 
-  /** Pick the visual hover target — prefers an editable block (so click-to-edit
-   *  is the obvious affordance), falls back to any selectable ancestor. */
+  function setSelectedEl(el: HTMLElement | null): void {
+    selectedEl = el;
+    refreshDeleteButton();
+  }
+
   function pickHoverTarget(target: Element | null): HTMLElement | null {
     if (!target) return null;
-    return session.findEditableBlock(target) ?? session.findSelectableElement(target);
+    return session.findSelectableElement(target);
+  }
+
+  function clearNavigationUi(): void {
+    hover.style.display = 'none';
+    selection.style.display = 'none';
+    deleteBtn.style.display = 'none';
+    setHoveredEl(null);
+    setFocusedEl(null);
+    setSelectedEl(null);
   }
 
   function showHover(el: HTMLElement | null): void {
-    if (!el || session.hasActiveBlock()) {
+    if (!el || session.hasActiveBlock() || nativeClickBypass) {
       hover.style.display = 'none';
       setHoveredEl(null);
       return;
@@ -116,7 +134,7 @@ export function setupOverlay(opts: OverlayOpts): void {
   }
 
   function showSelection(el: HTMLElement | null): void {
-    if (!el) {
+    if (!el || nativeClickBypass) {
       selection.style.display = 'none';
       return;
     }
@@ -126,15 +144,17 @@ export function setupOverlay(opts: OverlayOpts): void {
     selection.style.top = `${r.top}px`;
     selection.style.width = `${r.width}px`;
     selection.style.height = `${r.height}px`;
+    refreshDeleteButton();
   }
 
   document.addEventListener('mousemove', (e) => {
-    if (session.isLocked() || session.hasActiveBlock()) {
+    if (nativeClickBypass || session.isLocked() || session.hasActiveBlock()) {
       hover.style.display = 'none';
       setHoveredEl(null);
+      if (nativeClickBypass) deleteBtn.style.display = 'none';
       return;
     }
-    const target = e.target as Element | null;
+    const target = elementFromEventTarget(e.target);
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (target && isInOverlayUi(target)) return;
     showHover(pickHoverTarget(target));
@@ -162,77 +182,135 @@ export function setupOverlay(opts: OverlayOpts): void {
   deleteBtn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (session.isLocked() || session.hasActiveBlock()) return;
+    if (session.isLocked()) return;
     const target = deleteTargetEl();
     if (!target) return;
     setHoveredEl(null);
     setFocusedEl(null);
+    setSelectedEl(null);
     session.announceElementSelection(null);
     hover.style.display = 'none';
     showSelection(null);
     session.removeElement(target);
   });
 
-  document.addEventListener('click', (e) => {
-    if (session.isLocked()) return;
-    const target = e.target as Element | null;
-    if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
-    if (target && isInOverlayUi(target)) return;
+  function editFromEvent(e: MouseEvent | PointerEvent): boolean {
+    if (e instanceof MouseEvent && e.button !== 0) return false;
+    const target = elementFromEventTarget(e.target);
+    if (target && (target === deleteBtn || deleteBtn.contains(target))) return false;
+    if (target && isInOverlayUi(target)) return false;
     if (session.hasActiveBlock()) {
-      if (!session.isInsideActive(target)) {
-        session.commitEdit();
-        showSelection(null);
-      }
-      return;
+      if (session.isInsideActive(target)) return false;
+      session.commitEdit();
+      showSelection(null);
+      setSelectedEl(null);
     }
-    // Alt-click: bypass edit-mode logic, select the innermost element directly.
-    if (e.altKey) {
-      const exact = session.findSelectableElement(target);
-      if (!exact) return;
-      e.preventDefault();
-      e.stopPropagation();
-      hover.style.display = 'none';
-      setHoveredEl(null);
-      session.selectElement(exact);
-      session.announceElementSelection(exact);
-      return;
-    }
-    // Let page controls keep their native behavior in preview mode. Without
-    // this, selecting/editing ancestors prevents summaries from toggling and
-    // anchors/buttons from acting like the rendered page.
-    if (target && isInteractiveClickTarget(target)) return;
-    // Default click: prefer text-edit on an editable block, else select for delete.
     const block = session.findEditableBlock(target);
     if (block) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (session.beginEdit(block)) {
-        showSelection(block);
-        hover.style.display = 'none';
-        setHoveredEl(null);
-        setFocusedEl(null);
-        session.announceElementSelection(block);
-      }
-      return;
-    }
-    const selectable = session.findSelectableElement(target);
-    if (selectable) {
-      e.preventDefault();
-      e.stopPropagation();
       hover.style.display = 'none';
       setHoveredEl(null);
-      session.selectElement(selectable);
-      session.announceElementSelection(selectable);
+      setFocusedEl(null);
+      if (!session.beginEdit(block)) return false;
+      setSelectedEl(block);
+      showSelection(block);
+      session.announceElementSelection(block);
+      return true;
+    }
+    // Non-text-editable element (layout div, image, etc.): still selectable
+    // so the side-panel can mutate its attributes. Don't move focus — that
+    // would let a follow-up focusout (e.g. user clicking into the panel)
+    // wipe the selection.
+    const selectable = session.findSelectableElement(target);
+    if (!selectable) return false;
+    hover.style.display = 'none';
+    setHoveredEl(null);
+    setFocusedEl(null);
+    setSelectedEl(selectable);
+    showSelection(selectable);
+    session.announceElementSelection(selectable);
+    return true;
+  }
+
+  function shouldAllowNativeMouseEvent(
+    e: MouseEvent | PointerEvent,
+    target: Element | null,
+  ): boolean {
+    if (nativeClickBypass) return true;
+    if (e.altKey) return true;
+    if (target && (target === deleteBtn || deleteBtn.contains(target))) return true;
+    if (target && isInOverlayUi(target)) return true;
+    return session.hasActiveBlock() && session.isInsideActive(target);
+  }
+
+  function suppressInspectorMouseEvent(e: MouseEvent | PointerEvent): void {
+    if (session.isLocked()) return;
+    const target = elementFromEventTarget(e.target);
+    if (shouldAllowNativeMouseEvent(e, target)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+
+  document.addEventListener('pointerdown', suppressInspectorMouseEvent, true);
+  document.addEventListener('mousedown', suppressInspectorMouseEvent, true);
+  document.addEventListener('mouseup', suppressInspectorMouseEvent, true);
+  document.addEventListener('dblclick', suppressInspectorMouseEvent, true);
+
+  document.addEventListener(
+    'click',
+    (e) => {
+      if (session.isLocked()) return;
+      const target = elementFromEventTarget(e.target);
+      if (shouldAllowNativeMouseEvent(e, target)) {
+        if (nativeClickBypass || e.altKey) clearNavigationUi();
+        return;
+      }
+      if (nativeClickBypass) {
+        clearNavigationUi();
+        return;
+      }
+      editFromEvent(e);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    },
+    true,
+  );
+
+  document.addEventListener('click', (e) => {
+    if (session.isLocked()) return;
+    const target = elementFromEventTarget(e.target);
+    if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
+    if (target && isInOverlayUi(target)) return;
+    if (nativeClickBypass || e.altKey) {
+      clearNavigationUi();
+      return;
+    }
+    if (editFromEvent(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
     }
   });
 
   document.addEventListener('keydown', (e) => {
+    if (isCommandPaletteShortcut(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      session.requestCommandPalette();
+      return;
+    }
+    if (e.altKey && !isTextEntryTarget(document.activeElement)) {
+      if (!nativeClickBypass) {
+        nativeClickBypass = true;
+        clearNavigationUi();
+      }
+    }
     // Cmd/Ctrl+S: commit any active edit, then ask host to save.
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
       if (session.hasActiveBlock()) {
         session.commitEdit();
         showSelection(null);
+        setSelectedEl(null);
       }
       session.requestSave();
       return;
@@ -269,17 +347,28 @@ export function setupOverlay(opts: OverlayOpts): void {
       // In edit mode: never intercept Delete/Backspace — let contentEditable handle them.
       if (e.key === 'Escape') {
         e.preventDefault();
-        const block = session.activeBlockElement();
         session.cancelEdit();
-        showSelection(null);
-        block?.focus({ preventScroll: true });
+        session.announceElementSelection(null);
+        clearNavigationUi();
+        const active = document.activeElement as HTMLElement | null;
+        active?.blur();
       } else if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const block = session.activeBlockElement();
         session.commitEdit();
         showSelection(null);
+        setSelectedEl(null);
         block?.focus({ preventScroll: true });
       }
+      return;
+    }
+    // Not editing: Escape clears the current selection.
+    if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      session.announceElementSelection(null);
+      clearNavigationUi();
+      const active = document.activeElement as HTMLElement | null;
+      active?.blur();
       return;
     }
     // Not editing: Enter on a focused editable block enters edit mode.
@@ -290,6 +379,7 @@ export function setupOverlay(opts: OverlayOpts): void {
       if (block === focused) {
         e.preventDefault();
         if (session.beginEdit(block)) {
+          setSelectedEl(block);
           showSelection(block);
           hover.style.display = 'none';
           setHoveredEl(null);
@@ -309,6 +399,7 @@ export function setupOverlay(opts: OverlayOpts): void {
       e.preventDefault();
       setHoveredEl(null);
       setFocusedEl(null);
+      setSelectedEl(null);
       session.announceElementSelection(null);
       hover.style.display = 'none';
       showSelection(null);
@@ -316,11 +407,17 @@ export function setupOverlay(opts: OverlayOpts): void {
     }
   });
 
+  document.addEventListener('keyup', (e) => {
+    if (e.key !== 'Alt') return;
+    nativeClickBypass = false;
+  });
+
   document.addEventListener('focusin', (e) => {
-    if (session.hasActiveBlock()) return;
-    const target = e.target as Element | null;
+    if (session.hasActiveBlock() || nativeClickBypass) return;
+    const target = elementFromEventTarget(e.target);
     if (!(target instanceof HTMLElement)) return;
     if (session.findSelectableElement(target) !== target) return;
+    setSelectedEl(target);
     showSelection(target);
     hover.style.display = 'none';
     setFocusedEl(target);
@@ -331,6 +428,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     if (!session.hasActiveBlock()) {
       showSelection(null);
       setFocusedEl(null);
+      setSelectedEl(null);
     }
   });
 
@@ -348,6 +446,7 @@ export function setupOverlay(opts: OverlayOpts): void {
         if (active && isInOverlayUi(active)) return;
         session.commitEdit();
         showSelection(null);
+        setSelectedEl(null);
       }, 0);
     },
     true,
@@ -364,9 +463,14 @@ export function setupOverlay(opts: OverlayOpts): void {
     showSelection(null);
     setHoveredEl(null);
     setFocusedEl(null);
+    setSelectedEl(null);
   };
   window.addEventListener('resize', reposition);
   window.addEventListener('scroll', reposition, true);
+
+  window.addEventListener('blur', () => {
+    nativeClickBypass = false;
+  });
 }
 
 /**
@@ -408,6 +512,22 @@ function isInteractiveClickTarget(target: Element): boolean {
     cur = cur.parentElement;
   }
   return false;
+}
+
+function elementFromEventTarget(target: EventTarget | null): Element | null {
+  if (target instanceof Element) return target;
+  if (target instanceof Node) return target.parentElement;
+  return null;
+}
+
+function isCommandPaletteShortcut(e: KeyboardEvent): boolean {
+  return (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p';
+}
+
+function isTextEntryTarget(target: Element | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return target.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select';
 }
 
 function createDeleteButton(): HTMLButtonElement {

@@ -1,12 +1,15 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type {
+  AgentConnectionState,
+  AgentRunStatus,
   AgentSelectionState,
   DocumentState,
   EditBlockHtml,
   EditBlockTag,
   EditCommit,
   EditCancel,
+  EditElementAttrs,
   EditRemove,
   ElementSelectionChanged,
   ElementSelectionSnapshot,
@@ -16,9 +19,12 @@ import type {
   OffsetMap,
   Ready,
   RuntimeError,
+  WebviewActionMessage,
 } from '../shared/protocol';
 import { runSelectedElementAgent } from './agent';
+import { AgentCredentialStore } from './agent/credentials';
 import {
+  applyAttrEditCommit,
   applyBlockHtmlCommit,
   applyBlockTagCommit,
   applyEditCommit,
@@ -75,13 +81,8 @@ export interface PanelDeps {
   onDispose: () => void;
 }
 
-interface WebviewActionMessage {
-  type: '__webview_action';
-  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave' | 'undo' | 'redo' | 'askAgent';
-  value?: boolean;
-}
-
 type IncomingMessage = IframeMessage | WebviewActionMessage;
+type SaveMode = 'manual' | 'auto';
 
 export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDeps): PreviewPanel {
   const relativePath = relativeWebPath(deps.workspaceRoot, document.uri.fsPath);
@@ -103,9 +104,10 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   let currentInjectedPreviewHtml: string | null = null;
   let isTemplated = false;
   let expectedSelfEditVersion: number | null = null;
-  let autoSave = false;
+  let autoSave = true;
   let currentAgentSelection: ElementSelectionSnapshot | null = null;
   let agentRunning = false;
+  const credentials = new AgentCredentialStore(deps.context);
   const jsMode = isJsLikeDocument(document);
   const escapeReplacement: ReplacementEscaper | undefined = jsMode
     ? escapeForJsTemplate
@@ -175,13 +177,70 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     panel.webview.postMessage(msg);
   }
 
-  async function saveDocument(): Promise<void> {
+  async function postAgentConnectionState(): Promise<void> {
+    const key = await credentials.getApiKey('cursor');
+    const msg: AgentConnectionState = {
+      type: 'agentConnectionState',
+      providerId: 'cursor',
+      connected: !!key,
+      source: key?.source === 'prompt' ? 'secret' : key?.source,
+    };
+    panel.webview.postMessage(msg);
+  }
+
+  function postAgentRunStatus(phase: AgentRunStatus['phase'], text?: string): void {
+    const msg: AgentRunStatus = {
+      type: 'agentRunStatus',
+      providerId: 'cursor',
+      phase,
+      text,
+    };
+    panel.webview.postMessage(msg);
+  }
+
+  async function saveDocument(opts: { mode: SaveMode }): Promise<void> {
     if (!document.isDirty) return;
     try {
-      await document.save();
+      if (opts.mode === 'auto') {
+        await saveDocumentWithoutFormatting();
+      } else {
+        await document.save();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse save failed: ${message}`);
+    }
+  }
+
+  async function saveDocumentWithoutFormatting(): Promise<void> {
+    if (await trySaveWithoutFormattingForUri()) return;
+    if (await trySaveWithoutFormattingViaEditor()) return;
+    await document.save();
+  }
+
+  async function trySaveWithoutFormattingForUri(): Promise<boolean> {
+    try {
+      await vscode.commands.executeCommand(
+        'workbench.action.files.saveWithoutFormatting',
+        document.uri,
+      );
+      return !document.isDirty;
+    } catch {
+      return false;
+    }
+  }
+
+  async function trySaveWithoutFormattingViaEditor(): Promise<boolean> {
+    try {
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+      });
+      await vscode.commands.executeCommand('workbench.action.files.saveWithoutFormatting');
+      return !document.isDirty;
+    } catch {
+      return false;
+    } finally {
+      panel.reveal(vscode.ViewColumn.Beside, true);
     }
   }
 
@@ -223,19 +282,31 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         if (msg.action === 'editAnyway') {
           await vscode.commands.executeCommand('finesse.editAnyway');
         } else if (msg.action === 'save') {
-          await saveDocument();
+          await saveDocument({ mode: 'manual' });
         } else if (msg.action === 'discard') {
           await discardChanges();
         } else if (msg.action === 'setAutoSave') {
           autoSave = !!msg.value;
           postDocumentState();
-          if (autoSave) await saveDocument();
+          if (autoSave) await saveDocument({ mode: 'auto' });
         } else if (msg.action === 'undo') {
           await handleUndoRequest();
         } else if (msg.action === 'redo') {
           await handleRedoRequest();
-        } else if (msg.action === 'askAgent') {
-          await handleAskAgentRequest();
+        } else if (msg.action === 'commandPalette') {
+          await vscode.commands.executeCommand('workbench.action.showCommands');
+        } else if (msg.action === 'openCursorDashboard') {
+          await vscode.env.openExternal(
+            vscode.Uri.parse(AgentCredentialStore.cursorDashboardUrl),
+          );
+        } else if (msg.action === 'saveApiKey') {
+          await credentials.setApiKey('cursor', msg.value);
+          await postAgentConnectionState();
+        } else if (msg.action === 'forgetApiKey') {
+          await credentials.clearApiKey('cursor');
+          await postAgentConnectionState();
+        } else if (msg.action === 'runAgent') {
+          await handleRunAgentRequest(msg.value);
         }
         return;
       case 'ready':
@@ -253,17 +324,23 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       case 'editBlockTag':
         await handleEditBlockTag(msg);
         return;
+      case 'editElementAttrs':
+        await handleEditElementAttrs(msg);
+        return;
       case 'editCancel':
         handleEditCancel(msg);
         return;
       case 'saveRequest':
-        await saveDocument();
+        await saveDocument({ mode: 'manual' });
         return;
       case 'undoRequest':
         await handleUndoRequest();
         return;
       case 'redoRequest':
         await handleRedoRequest();
+        return;
+      case 'commandPaletteRequest':
+        await vscode.commands.executeCommand('workbench.action.showCommands');
         return;
       case 'elementSelectionChanged':
         handleElementSelectionChanged(msg);
@@ -283,6 +360,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     } satisfies FileMeta);
     postDocumentState();
     postAgentSelectionState();
+    void postAgentConnectionState();
   }
 
   function recordIfNonEmpty(entry: UndoEntry): void {
@@ -312,7 +390,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       } else {
         recordIfNonEmpty(result.undoEntry);
         postDocumentState();
-        if (autoSave) await saveDocument();
+        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -343,7 +421,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       } else {
         recordIfNonEmpty(result.undoEntry);
         postDocumentState();
-        if (autoSave) await saveDocument();
+        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -375,7 +453,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       } else {
         recordIfNonEmpty(result.undoEntry);
         postDocumentState();
-        if (autoSave) await saveDocument();
+        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
@@ -406,12 +484,46 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       } else {
         recordIfNonEmpty(result.undoEntry);
         postDocumentState();
-        if (autoSave) await saveDocument();
+        if (autoSave) await saveDocument({ mode: 'auto' });
       }
     } catch (err) {
       expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse tag transform failed: ${message}`);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+    }
+  }
+
+  async function handleEditElementAttrs(msg: EditElementAttrs): Promise<void> {
+    try {
+      const result = await applyAttrEditCommit({
+        document,
+        currentVersion,
+        currentOffsetMap,
+        commit: msg,
+        beforeApply: (expected) => {
+          expectedSelfEditVersion = expected;
+        },
+        escapeReplacement,
+      });
+      if (!result.ok) {
+        expectedSelfEditVersion = null;
+        if (result.reason === 'stale') {
+          panel.webview.postMessage({
+            type: 'staleCommit',
+            expectedVersion: result.expected,
+            actualVersion: result.actual,
+          });
+        }
+      } else {
+        recordIfNonEmpty(result.undoEntry);
+        postDocumentState();
+        if (autoSave) await saveDocument({ mode: 'auto' });
+      }
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`Finesse attribute edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }
@@ -436,7 +548,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       }
       undoStack.pushRedo(entry);
       postDocumentState();
-      if (autoSave) await saveDocument();
+      if (autoSave) await saveDocument({ mode: 'auto' });
     } catch (err) {
       expectedSelfEditVersion = null;
       undoStack.clear();
@@ -466,7 +578,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       }
       undoStack.pushUndo(entry);
       postDocumentState();
-      if (autoSave) await saveDocument();
+      if (autoSave) await saveDocument({ mode: 'auto' });
     } catch (err) {
       expectedSelfEditVersion = null;
       undoStack.clear();
@@ -481,10 +593,15 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     postAgentSelectionState();
   }
 
-  async function handleAskAgentRequest(): Promise<void> {
+  async function handleRunAgentRequest(userPrompt: string): Promise<void> {
     if (agentRunning) return;
+    const trimmed = (userPrompt ?? '').trim();
+    if (!trimmed) {
+      postAgentRunStatus('error', 'Prompt was empty.');
+      return;
+    }
     if (!currentAgentSelection || !currentOffsetMap) {
-      void vscode.window.showInformationMessage('Select an element in the preview first.');
+      postAgentRunStatus('error', 'Select an element in the preview first.');
       return;
     }
     if (
@@ -493,27 +610,13 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     ) {
       currentAgentSelection = null;
       postAgentSelectionState();
-      void vscode.window.showWarningMessage('That selection is stale. Select the element again.');
+      postAgentRunStatus('error', 'That selection is stale. Select the element again.');
       return;
     }
 
-    const userPrompt = await vscode.window.showInputBox({
-      title: 'Ask Agent to change selected element',
-      prompt: `Selected ${selectionLabel(currentAgentSelection)} in ${relativePath}`,
-      placeHolder: 'Make this button more prominent',
-      ignoreFocusOut: true,
-    });
-    if (!userPrompt || !userPrompt.trim()) return;
-
-    const approved = await vscode.window.showWarningMessage(
-      `Run Cursor Agent on ${selectionLabel(currentAgentSelection)}? This may use Cursor agent credits.`,
-      { modal: true },
-      'Run Agent',
-    );
-    if (approved !== 'Run Agent') return;
-
     agentRunning = true;
     postAgentSelectionState();
+    postAgentRunStatus('starting', `Running Cursor Agent on ${selectionLabel(currentAgentSelection)}`);
     try {
       await runSelectedElementAgent({
         providerId: 'cursor',
@@ -524,17 +627,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         relativePath,
         offsetMap: currentOffsetMap,
         selection: currentAgentSelection,
-        userPrompt: userPrompt.trim(),
+        userPrompt: trimmed,
+        onStatus: (text) => postAgentRunStatus('status', text),
+        onOutput: (text) => postAgentRunStatus('output', text),
       });
+      postAgentRunStatus('done');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const action = await vscode.window.showErrorMessage(
-        `Finesse agent failed: ${humanizeAgentError(message)}`,
-        'Connect Cursor Agent',
-      );
-      if (action === 'Connect Cursor Agent') {
-        await vscode.commands.executeCommand('finesse.connectCursorAgent');
-      }
+      postAgentRunStatus('error', humanizeAgentError(message));
+      // Re-check connection — if the key is missing/invalid, the popover flips
+      // back to the Connect state automatically.
+      await postAgentConnectionState();
     } finally {
       agentRunning = false;
       postAgentSelectionState();
@@ -680,11 +783,11 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
       #status .dirty-dot { color: #e2a04a; font-size: 13px; line-height: 1; opacity: 0; transition: opacity 100ms ease-out; }
       #status .dirty-dot.is-dirty { opacity: 1; }
       #status button.tool { font: inherit; font-size: 11px; background: transparent; color: inherit; border: 1px solid var(--vscode-panel-border); border-radius: 2px; padding: 1px 8px; cursor: pointer; opacity: 0.85; }
-      #status button.tool:hover:not(:disabled) { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06)); }
-      #status button.tool:disabled { opacity: 0.4; cursor: default; }
-      #status label.toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; opacity: 0.85; }
-      #status label.toggle input { margin: 0; }
-      #banners { display: flex; flex-direction: column; }
+	      #status button.tool:hover:not(:disabled) { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06)); }
+	      #status button.tool:disabled { opacity: 0.4; cursor: default; }
+	      #status label.toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; opacity: 0.85; }
+	      #status label.toggle input { margin: 0; }
+	      #banners { display: flex; flex-direction: column; }
       .banner { padding: 8px 12px; font-size: 13px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--vscode-panel-border); }
       .banner-warn { background: var(--vscode-inputValidation-warningBackground); color: var(--vscode-inputValidation-warningForeground); }
       .banner-error { background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-inputValidation-errorForeground); }
@@ -692,8 +795,21 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
       .banner button:hover { background: var(--vscode-button-hoverBackground); }
       .banner .dismiss { margin-left: auto; opacity: 0.6; cursor: pointer; padding: 0 4px; }
       .banner .dismiss:hover { opacity: 1; }
-      #frame-wrap { flex: 1; position: relative; }
+      #main-row { flex: 1; display: flex; flex-direction: row; min-height: 0; }
+      #frame-wrap { flex: 1; position: relative; min-width: 0; }
       #frame { width: 100%; height: 100%; border: none; background: white; }
+      #side-dock {
+        display: flex;
+        flex-direction: column;
+        flex: 0 0 264px;
+        width: 264px;
+        min-height: 0;
+        border-left: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+        background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+        color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground));
+        font-family: var(--vscode-font-family);
+        font-size: 12px;
+      }
     </style>
     <script>window.__FINESSE_INIT__ = ${initJson};</script>
   </head>
@@ -703,22 +819,24 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
       <span id="status-file" class="muted">no file</span>
       <span id="status-version" class="muted">v?</span>
       <span id="status-port" class="muted">-</span>
-      <span id="status-locked" class="muted" hidden>editing locked</span>
-      <span id="status-selection" class="muted selection" hidden>no selection</span>
-      <span class="grow"></span>
-      <label class="toggle" title="Save automatically after each edit">
+	      <span id="status-locked" class="muted" hidden>editing locked</span>
+	      <span id="status-selection" class="muted selection" hidden>no selection</span>
+	      <span class="grow"></span>
+	      <label class="toggle" title="Save automatically after each edit">
         <input id="status-autosave" type="checkbox" />
         <span>Auto-save</span>
       </label>
       <button id="status-discard" class="tool" type="button" title="Discard unsaved changes" disabled>Discard</button>
       <button id="status-undo" class="tool" type="button" title="Undo Finesse edit (⌘Z)" disabled>Undo</button>
       <button id="status-redo" class="tool" type="button" title="Redo Finesse edit (⇧⌘Z)" disabled>Redo</button>
-      <button id="status-ask-agent" class="tool" type="button" title="Ask an agent to change the selected element" disabled>Ask Agent</button>
       <button id="status-save" class="tool" type="button" title="Save (⌘S)" disabled>Save</button>
     </div>
     <div id="banners" role="region" aria-label="Finesse notifications" aria-live="polite"></div>
-    <div id="frame-wrap">
-      <iframe id="frame" title="HTML preview" aria-label="HTML preview" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+    <div id="main-row">
+      <div id="frame-wrap">
+        <iframe id="frame" title="HTML preview" aria-label="HTML preview" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+      </div>
+      <div id="side-dock" aria-label="Style panel"></div>
     </div>
     <script src="${mainJs}"></script>
   </body>

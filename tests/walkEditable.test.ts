@@ -45,6 +45,20 @@ describe('walkEditable', () => {
     expect(linkedElement?.tagName).toBe('p');
   });
 
+  it('treats nested spans as editable text blocks for drill-in edits', () => {
+    const html =
+      '<!doctype html><html><body><button><span class="num">1C</span><span class="name">Internal <span class="who-line">self-onboard</span></span></button></body></html>';
+    const map = walkEditable(html, 1);
+    const blocks = map.blocks.map((b) => {
+      const el = map.elements.find((candidate) => candidate.elementId === b.elementId);
+      return { tagName: b.tagName, source: html.slice(el!.startOffset, el!.endOffset) };
+    });
+
+    expect(blocks.filter((b) => b.tagName === 'span')).toHaveLength(3);
+    expect(map.textNodes.map((tn) => tn.originalText)).toEqual(['1C', 'Internal ', 'self-onboard']);
+    expect(blocks.some((b) => b.source.includes('class="who-line"'))).toBe(true);
+  });
+
   it('does not synthesise an elementId for browser-implicit tbody (no source location)', () => {
     // Source has <table><tr> directly; parse5 inserts an implicit <tbody> with no location.
     const html =

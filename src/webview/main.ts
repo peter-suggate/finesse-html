@@ -1,4 +1,13 @@
-import type { FileMeta, HostMessage, IframeMessage } from '../shared/protocol';
+import type {
+  ElementSelectionSnapshot,
+  FileMeta,
+  HostMessage,
+  IframeMessage,
+  PanelStyleEdit,
+  WebviewActionMessage,
+} from '../shared/protocol';
+import { setupSidePanel, type SidePanelController } from './stylePanel';
+import { setupAgentPanel, type AgentPanelController } from './agentPanel';
 import {
   dismissAll,
   initBanners,
@@ -27,12 +36,6 @@ interface VsCodeApi {
 }
 declare const acquireVsCodeApi: () => VsCodeApi;
 
-interface WebviewActionMessage {
-  type: '__webview_action';
-  action: 'editAnyway' | 'save' | 'discard' | 'setAutoSave' | 'undo' | 'redo' | 'askAgent';
-  value?: boolean;
-}
-
 const vscode = acquireVsCodeApi();
 const init = window.__FINESSE_INIT__;
 
@@ -49,7 +52,7 @@ if (!init) {
       port: init.port,
       locked: init.fileMeta.isTemplated,
       isDirty: false,
-      autoSave: false,
+      autoSave: true,
       canUndo: false,
       canRedo: false,
       selectedLabel: undefined,
@@ -61,7 +64,6 @@ if (!init) {
       onToggleAutoSave: (next) => requestSetAutoSave(next),
       onUndo: requestUndo,
       onRedo: requestRedo,
-      onAskAgent: requestAskAgent,
     },
   );
   if (init.fileMeta.isTemplated) {
@@ -70,39 +72,36 @@ if (!init) {
   bootIframe(init);
 }
 
-function requestEditAnyway(): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'editAnyway' };
+function post(msg: WebviewActionMessage): void {
   vscode.postMessage(msg);
+}
+
+function requestEditAnyway(): void {
+  post({ type: '__webview_action', action: 'editAnyway' });
 }
 
 function requestSave(): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'save' };
-  vscode.postMessage(msg);
+  post({ type: '__webview_action', action: 'save' });
 }
 
 function requestDiscard(): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'discard' };
-  vscode.postMessage(msg);
+  post({ type: '__webview_action', action: 'discard' });
 }
 
 function requestSetAutoSave(value: boolean): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'setAutoSave', value };
-  vscode.postMessage(msg);
+  post({ type: '__webview_action', action: 'setAutoSave', value });
 }
 
 function requestUndo(): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'undo' };
-  vscode.postMessage(msg);
+  post({ type: '__webview_action', action: 'undo' });
 }
 
 function requestRedo(): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'redo' };
-  vscode.postMessage(msg);
+  post({ type: '__webview_action', action: 'redo' });
 }
 
-function requestAskAgent(): void {
-  const msg: WebviewActionMessage = { type: '__webview_action', action: 'askAgent' };
-  vscode.postMessage(msg);
+function requestCommandPalette(): void {
+  post({ type: '__webview_action', action: 'commandPalette' });
 }
 
 function bootIframe(init: InitData): void {
@@ -115,6 +114,37 @@ function bootIframe(init: InitData): void {
   const iframeOrigin = new URL(init.iframeUrl).origin;
   frame.src = init.iframeUrl;
 
+  // Mount the right-hand side dock: style panel on top (fills available space),
+  // agent panel pinned to the bottom. The style panel posts PanelStyleEdit
+  // messages directly into the iframe; the iframe applies optimistically and
+  // forwards the canonical commit to the host.
+  const dock = document.getElementById('side-dock');
+  let sidePanel: SidePanelController | null = null;
+  let agentPanel: AgentPanelController | null = null;
+  if (dock) {
+    sidePanel = setupSidePanel({
+      host: dock,
+      sender: {
+        toIframe(msg: PanelStyleEdit) {
+          postToIframe(msg);
+        },
+      },
+    });
+    sidePanel.setLocked(init.fileMeta.isTemplated);
+    agentPanel = setupAgentPanel({
+      host: dock,
+      actions: {
+        onOpenDashboard: () => post({ type: '__webview_action', action: 'openCursorDashboard' }),
+        onSaveApiKey: (value) => post({ type: '__webview_action', action: 'saveApiKey', value }),
+        onForgetApiKey: () => post({ type: '__webview_action', action: 'forgetApiKey' }),
+        onRunAgent: (value) => {
+          agentPanel?.clearLog();
+          post({ type: '__webview_action', action: 'runAgent', value });
+        },
+      },
+    });
+  }
+
   window.addEventListener('message', (event: MessageEvent) => {
     if (event.source === frame.contentWindow) {
       handleIframeMessage(event.data);
@@ -123,7 +153,7 @@ function bootIframe(init: InitData): void {
     handleHostMessage(event.data);
   });
 
-  function relayToIframe(msg: HostMessage): void {
+  function postToIframe(msg: unknown): void {
     const win = frame.contentWindow;
     if (!win) return;
     try {
@@ -133,10 +163,17 @@ function bootIframe(init: InitData): void {
     }
   }
 
+  function relayToIframe(msg: HostMessage): void {
+    postToIframe(msg);
+  }
+
   function handleIframeMessage(data: unknown): void {
     if (!isIframeMessage(data)) return;
     if (data.type === 'runtimeError') {
       showRuntimeErrorBanner(data.message);
+    }
+    if (data.type === 'elementSelectionChanged') {
+      sidePanel?.setSelection(data.selection as ElementSelectionSnapshot | null);
     }
     vscode.postMessage(data);
   }
@@ -161,6 +198,7 @@ function bootIframe(init: InitData): void {
         break;
       case 'fileMeta':
         updateStatus({ locked: data.isTemplated });
+        sidePanel?.setLocked(data.isTemplated);
         if (data.isTemplated) {
           showTemplatedBanner({ onEditAnyway: requestEditAnyway });
         } else {
@@ -181,6 +219,36 @@ function bootIframe(init: InitData): void {
           selectedLabel: data.selected ? data.label : undefined,
           agentRunning: data.agentRunning,
         });
+        agentPanel?.setState({
+          selectedLabel: data.selected ? data.label : undefined,
+          agentRunning: data.agentRunning,
+        });
+        break;
+      case 'agentConnectionState':
+        agentPanel?.setState({
+          connected: data.connected,
+          connectionSource: data.source,
+        });
+        break;
+      case 'agentRunStatus':
+        switch (data.phase) {
+          case 'starting':
+            agentPanel?.clearLog();
+            if (data.text) agentPanel?.appendLog(`${data.text}\n`);
+            break;
+          case 'status':
+            if (data.text) agentPanel?.appendLog(`[${data.text}]\n`);
+            break;
+          case 'output':
+            if (data.text) agentPanel?.appendLog(data.text);
+            break;
+          case 'done':
+            agentPanel?.appendLog('\n— done —\n');
+            break;
+          case 'error':
+            agentPanel?.setError(data.text ?? 'Agent run failed.');
+            break;
+        }
         break;
     }
   }
@@ -203,6 +271,11 @@ window.addEventListener(
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'y') {
       e.preventDefault();
       requestRedo();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+      e.preventDefault();
+      requestCommandPalette();
     }
   },
   true,
@@ -216,12 +289,14 @@ function isIframeMessage(data: unknown): data is IframeMessage {
     t === 'editRemove' ||
     t === 'editBlockHtml' ||
     t === 'editBlockTag' ||
+    t === 'editElementAttrs' ||
     t === 'editCancel' ||
     t === 'runtimeError' ||
     t === 'ready' ||
     t === 'saveRequest' ||
     t === 'undoRequest' ||
     t === 'redoRequest' ||
+    t === 'commandPaletteRequest' ||
     t === 'elementSelectionChanged'
   );
 }
@@ -236,6 +311,8 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'staleCommit' ||
     t === 'fileMeta' ||
     t === 'documentState' ||
-    t === 'agentSelectionState'
+    t === 'agentSelectionState' ||
+    t === 'agentConnectionState' ||
+    t === 'agentRunStatus'
   );
 }

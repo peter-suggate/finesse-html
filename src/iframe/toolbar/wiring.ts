@@ -7,9 +7,11 @@
 
 import type { EditSession } from '../editSession';
 import {
+  applyFontWeight,
   applyInlineFormat,
   applyLink,
   clearFormatting,
+  queryFontWeight,
   queryFormatState,
   type FormatState,
   type InlineFormat,
@@ -32,6 +34,18 @@ const BLOCK_TAG_OPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 const INLINE_FORMATS: readonly InlineFormat[] = ['bold', 'italic', 'underline', 'strike', 'code'];
+
+const FONT_WEIGHT_OPTIONS: ReadonlySet<string> = new Set([
+  '100',
+  '200',
+  '300',
+  '400',
+  '500',
+  '600',
+  '700',
+  '800',
+  '900',
+]);
 
 export interface DefaultWiringOpts {
   session: EditSession;
@@ -79,6 +93,13 @@ export function makeDefaultActionHandler(opts: DefaultWiringOpts): ToolbarAction
       case 'clear':
         clearFormatting();
         return;
+      case 'fontWeight':
+        if (!value || !FONT_WEIGHT_OPTIONS.has(value)) return;
+        applyFontWeight(value, ctx.block);
+        return;
+      case 'delete':
+        session.removeElement(ctx.block);
+        return;
       case 'block': {
         if (!value) return;
         const tag = value.toLowerCase();
@@ -103,6 +124,7 @@ export function makeDefaultRefreshHandler(opts: { session: EditSession }): Toolb
     setActiveStates(ctx, state);
     const pending = opts.session.pendingTag();
     ctx.toolbar.setSelectValue('block', pending ?? ctx.block.tagName.toLowerCase());
+    ctx.toolbar.setSelectValue('fontWeight', queryFontWeight(sel, ctx.block));
   };
 }
 

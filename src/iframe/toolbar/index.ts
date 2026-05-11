@@ -21,7 +21,9 @@ export type ToolbarActionName =
   | 'code'
   | 'link'
   | 'clear'
-  | 'block';
+  | 'block'
+  | 'fontWeight'
+  | 'delete';
 
 export interface ToolbarActionContext {
   /** The editable block the action targets. */
@@ -68,6 +70,23 @@ export const DEFAULT_SPECS: readonly ButtonSpec[] = [
     ],
   },
   { name: 'sep1', kind: 'separator', label: '' },
+  {
+    name: 'fontWeight',
+    kind: 'select',
+    label: 'Font weight',
+    options: [
+      { value: '400', label: 'Regular' },
+      { value: '100', label: 'Thin' },
+      { value: '200', label: 'Extra Light' },
+      { value: '300', label: 'Light' },
+      { value: '500', label: 'Medium' },
+      { value: '600', label: 'Semibold' },
+      { value: '700', label: 'Bold' },
+      { value: '800', label: 'Extra Bold' },
+      { value: '900', label: 'Black' },
+    ],
+  },
+  { name: 'sepWeight', kind: 'separator', label: '' },
   { name: 'bold', kind: 'toggle', label: 'Bold', icon: ICONS.bold, shortcut: '⌘B' },
   { name: 'italic', kind: 'toggle', label: 'Italic', icon: ICONS.italic, shortcut: '⌘I' },
   { name: 'underline', kind: 'toggle', label: 'Underline', icon: ICONS.underline, shortcut: '⌘U' },
@@ -76,6 +95,8 @@ export const DEFAULT_SPECS: readonly ButtonSpec[] = [
   { name: 'sep2', kind: 'separator', label: '' },
   { name: 'link', kind: 'action', label: 'Link', icon: ICONS.link, shortcut: '⌘K' },
   { name: 'clear', kind: 'action', label: 'Clear formatting', icon: ICONS.clear },
+  { name: 'sep3', kind: 'separator', label: '' },
+  { name: 'delete', kind: 'action', label: 'Delete element', icon: ICONS.trash },
 ];
 
 export interface ToolbarController {
@@ -137,6 +158,7 @@ export function setupFormatToolbar(opts: SetupToolbarOpts): ToolbarController {
     const c = ctx();
     if (!c) return;
     if (opts.onAction) opts.onAction(name, value, c);
+    if (name === 'delete') return;
     if (document.activeElement !== c.block) {
       c.block.focus({ preventScroll: true });
     }

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/reinstall-cursor-extension-hook.sh",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

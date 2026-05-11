@@ -1,5 +1,6 @@
 import type {
   ElementSelectionSnapshot,
+  ElementStyleSnapshot,
   FileMeta,
   IframeMessage,
   OffsetMap,
@@ -35,6 +36,7 @@ const BLOCK_TAGS: ReadonlySet<string> = new Set([
   'td',
   'th',
   'caption',
+  'span',
 ]);
 const NON_EDITABLE_PARENT_TAGS: ReadonlySet<string> = new Set([
   'script',
@@ -52,6 +54,7 @@ const SKIP_SUBTREE_TAGS: ReadonlySet<string> = new Set([
   'noscript',
   'template',
 ]);
+const INLINE_TEXT_BLOCK_TAGS: ReadonlySet<string> = new Set(['span']);
 
 export interface EditSession {
   applyOffsetMap(map: OffsetMap): void;
@@ -73,6 +76,8 @@ export interface EditSession {
   requestUndo(): void;
   /** Ask the host to redo the most recently undone edit. */
   requestRedo(): void;
+  /** Ask the host to open Cursor/VS Code's command palette. */
+  requestCommandPalette(): void;
   isLocked(): boolean;
   hasActiveBlock(): boolean;
   activeBlockElement(): HTMLElement | null;
@@ -100,6 +105,24 @@ export interface EditSession {
   sendBlockHtmlCommit(blockId: number, newInnerHtml: string): void;
   /** Send a block-tag transform commit. */
   sendBlockTagCommit(blockId: number, newTagName: string): void;
+  /**
+   * Send an attribute-edit commit for `el`. `attrs` maps name → value (set)
+   * or null (remove). Returns false if the element isn't tracked.
+   */
+  sendAttrEditCommit(el: HTMLElement, attrs: Record<string, string | null>): boolean;
+  /** The currently selected element (mirrors the most recent `announceElementSelection`). */
+  selectedElement(): HTMLElement | null;
+  /** Subscribe to selection changes. Returns an unsubscribe. */
+  onSelectionChange(listener: (el: HTMLElement | null) => void): () => void;
+  /** Lookup the live DOM element for a given source elementId. */
+  findElementById(elementId: number): HTMLElement | null;
+  /**
+   * High-level entry for the side-panel pipeline: apply attribute changes
+   * optimistically to the DOM, sequence around any active text edit, and
+   * dispatch the canonical {@link IframeMessage} commit. Returns true if a
+   * dispatch (or queued dispatch) occurred.
+   */
+  applyStyleEdit(el: HTMLElement, attrs: Record<string, string | null>): boolean;
   /**
    * Stage a tag rename for the active block. Applied atomically with any
    * inner edit on the next commit. Pass null to clear.
@@ -131,8 +154,11 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   let snapshotTexts: string[] = [];
   let snapshotTextNodes: Text[] = [];
   let snapshotHTML = '';
+  let snapshotStructureHTML = '';
   let pendingNewTag: string | null = null;
+  let selectedEl: HTMLElement | null = null;
   const stateListeners: Array<(state: EditState) => void> = [];
+  const selectionListeners: Array<(el: HTMLElement | null) => void> = [];
 
   function notifyState(state: EditState): void {
     for (const l of stateListeners) {
@@ -195,6 +221,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   }
 
   function applyA11yAttrs(el: HTMLElement): void {
+    if (INLINE_TEXT_BLOCK_TAGS.has(el.tagName.toLowerCase())) return;
     if (el.dataset.finesseApplied === 'true') return;
     if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
     if (!el.hasAttribute('role')) el.setAttribute('role', 'region');
@@ -215,12 +242,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       const el = node as HTMLElement;
       const tag = el.tagName.toLowerCase();
       if (SKIP_SUBTREE_TAGS.has(tag)) return;
-      if (
-        el.id === 'finesse-hover' ||
-        el.id === 'finesse-selection' ||
-        el.id === 'finesse-delete' ||
-        el.id === 'finesse-toolbar'
-      ) {
+      if (el.id && el.id.startsWith('finesse-')) {
         return;
       }
       const elLocked =
@@ -308,6 +330,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     snapshotTextNodes = collectBlockTexts(block);
     snapshotTexts = snapshotTextNodes.map((t) => t.data);
     snapshotHTML = block.innerHTML;
+    snapshotStructureHTML = htmlWithTextPlaceholders(block);
     block.setAttribute('contenteditable', 'true');
     block.setAttribute('spellcheck', 'true');
     block.focus({ preventScroll: true });
@@ -339,8 +362,9 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       currentTexts.length === snapshotNodes.length &&
       currentTexts.every((n, i) => n === snapshotNodes[i]);
     const innerHtmlChanged = block.innerHTML !== snapshotHTML;
+    const structureChanged = htmlWithTextPlaceholders(block) !== snapshotStructureHTML;
 
-    if (sameNodes && ids.length === snapshotNodes.length) {
+    if (!structureChanged && sameNodes && ids.length === snapshotNodes.length) {
       // Text-only edit — use the byte-perfect text-node pipe.
       const after = currentTexts.map((t) => t.data);
       const edits = computeEdits(ids, snapshotTexts, after);
@@ -427,6 +451,10 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     opts.postToParent({ type: 'redoRequest' });
   }
 
+  function requestCommandPalette(): void {
+    opts.postToParent({ type: 'commandPaletteRequest' });
+  }
+
   function selectElement(el: HTMLElement): void {
     if (isLocked()) return;
     if (!el.hasAttribute('tabindex')) {
@@ -457,6 +485,34 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     // If we deferred a tag rename behind a text commit, fire it now that the
     // host's response has aligned us to the post-commit version.
     if (queuedTag) flushQueuedTag();
+    // Same trick for a panel-driven attr edit that landed mid-text-edit.
+    if (queuedPanelEdit) {
+      const q = queuedPanelEdit;
+      queuedPanelEdit = null;
+      // The element identity may have been replaced by the host's reparse —
+      // resolve fresh by id if possible.
+      const elementId = elementToElementId.get(q.el);
+      const fresh = elementId !== undefined ? q.el : null;
+      if (fresh) sendAttrEditCommit(fresh, q.attrs);
+    }
+    // Re-poke selection listeners so panels re-sync against the refreshed
+    // element ↔ id map. Pass the current selection (still a live DOM node)
+    // through so the panel can read the latest inline style. We also re-emit
+    // the rich snapshot to the host so the chrome side panel sees the new
+    // inline style after a self-edit ack.
+    if (selectedEl && selectedEl.isConnected) {
+      opts.postToParent({
+        type: 'elementSelectionChanged',
+        selection: describeElement(selectedEl),
+      });
+      for (const l of selectionListeners) {
+        try {
+          l(selectedEl);
+        } catch (err) {
+          opts.onError(`selection listener: ${(err as Error).message}`, (err as Error).stack);
+        }
+      }
+    }
   }
 
   function applyFileMeta(meta: FileMeta): void {
@@ -537,14 +593,23 @@ export function setupEditSession(opts: SetupOpts): EditSession {
         width: rect.width,
         height: rect.height,
       },
+      styles: snapshotStyles(el),
     };
   }
 
   function announceElementSelection(el: HTMLElement | null): void {
+    selectedEl = el;
     opts.postToParent({
       type: 'elementSelectionChanged',
       selection: el ? describeElement(el) : null,
     });
+    for (const l of selectionListeners) {
+      try {
+        l(el);
+      } catch (err) {
+        opts.onError(`selection listener: ${(err as Error).message}`, (err as Error).stack);
+      }
+    }
   }
 
   function sendBlockHtmlCommit(blockId: number, newInnerHtml: string): void {
@@ -575,6 +640,62 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     return pendingNewTag;
   }
 
+  function sendAttrEditCommit(el: HTMLElement, attrs: Record<string, string | null>): boolean {
+    if (!offsetMap) return false;
+    const elementId = elementToElementId.get(el);
+    if (elementId === undefined) return false;
+    opts.postToParent({
+      type: 'editElementAttrs',
+      documentVersion: offsetMap.documentVersion,
+      elementId,
+      attrs,
+    });
+    return true;
+  }
+
+  /** Optimistically apply attribute changes to a live DOM element. */
+  function applyAttrsToDom(el: HTMLElement, attrs: Record<string, string | null>): void {
+    for (const [name, value] of Object.entries(attrs)) {
+      if (value === null) el.removeAttribute(name);
+      else el.setAttribute(name, value);
+    }
+  }
+
+  /** Queue used when a panel-driven attr edit must wait for a text-commit ack. */
+  let queuedPanelEdit: { el: HTMLElement; attrs: Record<string, string | null> } | null = null;
+
+  function applyStyleEdit(el: HTMLElement, attrs: Record<string, string | null>): boolean {
+    if (isLocked()) return false;
+    if (!offsetMap) return false;
+    if (!elementToElementId.has(el)) return false;
+    applyAttrsToDom(el, attrs);
+    if (activeBlock && (el === activeBlock || activeBlock.contains(el) || el.contains(activeBlock))) {
+      // The panel touched the actively-edited block (or one of its ancestors / descendants).
+      // Commit the text edit first, then dispatch the attr edit on the next ack so
+      // both edits target a fresh document version.
+      queuedPanelEdit = { el, attrs };
+      commitEdit();
+      return true;
+    }
+    return sendAttrEditCommit(el, attrs);
+  }
+
+  function findElementById(elementId: number): HTMLElement | null {
+    return elementIdToElement.get(elementId) ?? null;
+  }
+
+  function selectedElement(): HTMLElement | null {
+    return selectedEl;
+  }
+
+  function onSelectionChange(listener: (el: HTMLElement | null) => void): () => void {
+    selectionListeners.push(listener);
+    return () => {
+      const i = selectionListeners.indexOf(listener);
+      if (i >= 0) selectionListeners.splice(i, 1);
+    };
+  }
+
   if (offsetMap) rebuild();
 
   return {
@@ -590,6 +711,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     requestSave,
     requestUndo,
     requestRedo,
+    requestCommandPalette,
     isLocked,
     hasActiveBlock,
     activeBlockElement,
@@ -604,6 +726,41 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     sendBlockTagCommit,
     setPendingTag,
     pendingTag,
+    sendAttrEditCommit,
+    selectedElement,
+    onSelectionChange,
+    findElementById,
+    applyStyleEdit,
+  };
+}
+
+function snapshotStyles(el: HTMLElement): ElementStyleSnapshot {
+  const computed = window.getComputedStyle(el);
+  return {
+    inlineStyle: el.getAttribute('style'),
+    computed: {
+      display: computed.display,
+      paddingTop: computed.paddingTop,
+      paddingRight: computed.paddingRight,
+      paddingBottom: computed.paddingBottom,
+      paddingLeft: computed.paddingLeft,
+      marginTop: computed.marginTop,
+      marginRight: computed.marginRight,
+      marginBottom: computed.marginBottom,
+      marginLeft: computed.marginLeft,
+      borderTopWidth: computed.borderTopWidth,
+      borderTopStyle: computed.borderTopStyle,
+      borderTopColor: computed.borderTopColor,
+      borderTopLeftRadius: computed.borderTopLeftRadius,
+      backgroundColor: computed.backgroundColor,
+      flexDirection: computed.flexDirection,
+      justifyContent: computed.justifyContent,
+      alignItems: computed.alignItems,
+      flexWrap: computed.flexWrap,
+      rowGap: computed.rowGap,
+      gridTemplateColumns: computed.gridTemplateColumns,
+      gridTemplateRows: computed.gridTemplateRows,
+    },
   };
 }
 
@@ -665,4 +822,15 @@ function placeCaretAtEnd(el: HTMLElement): void {
   if (!sel) return;
   sel.removeAllRanges();
   sel.addRange(range);
+}
+
+function htmlWithTextPlaceholders(el: HTMLElement): string {
+  const clone = el.cloneNode(true) as HTMLElement;
+  const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    node.textContent = '\u0000';
+    node = walker.nextNode();
+  }
+  return clone.innerHTML;
 }

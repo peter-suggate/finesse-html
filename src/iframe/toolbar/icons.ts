@@ -26,6 +26,9 @@ export const ICONS = {
   clear: SVG(
     '<path d="M3 13l5-5"/><path d="M5.5 5.5l3 3"/><path d="M9 3l3 3-4.5 4.5L4.5 7.5z"/><line x1="3.5" y1="13" x2="13" y2="13"/>',
   ),
+  trash: SVG(
+    '<path d="M3.5 4.5h9"/><path d="M6.5 4.5v-1h3v1"/><path d="M5 4.5l.5 8h5l.5-8"/><line x1="7" y1="7" x2="7" y2="10.5"/><line x1="9" y1="7" x2="9" y2="10.5"/>',
+  ),
 };
 
 export type IconName = keyof typeof ICONS;

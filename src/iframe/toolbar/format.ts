@@ -59,6 +59,55 @@ export function applyInlineFormat(format: InlineFormat, boundary: HTMLElement): 
   return document.execCommand(cmd);
 }
 
+export function applyFontWeight(weight: string, boundary: HTMLElement): boolean {
+  const normalized = normalizeFontWeight(weight);
+  if (!normalized) return false;
+  const sel = window.getSelection();
+  const targetRange = document.createRange();
+  if (!sel || sel.rangeCount === 0) {
+    targetRange.selectNodeContents(boundary);
+  } else {
+    const sourceRange = sel.getRangeAt(0);
+    targetRange.setStart(sourceRange.startContainer, sourceRange.startOffset);
+    targetRange.setEnd(sourceRange.endContainer, sourceRange.endOffset);
+    if (targetRange.collapsed) {
+      targetRange.selectNodeContents(boundary);
+    }
+  }
+  const fragment = targetRange.extractContents();
+  stripFontWeight(fragment);
+  const replacement =
+    normalized === '400' ? fragment : wrapFragmentWithFontWeight(fragment, normalized);
+  targetRange.insertNode(replacement);
+  const nextRange = document.createRange();
+  nextRange.selectNodeContents(boundary);
+  nextRange.collapse(false);
+  const nextSelection = window.getSelection();
+  if (nextSelection) {
+    nextSelection.removeAllRanges();
+    nextSelection.addRange(nextRange);
+  }
+  return true;
+}
+
+export function queryFontWeight(selection: Selection | null, boundary: HTMLElement): string {
+  if (!selection || selection.rangeCount === 0) return '400';
+  const range = selection.getRangeAt(0);
+  let anchor: Node | null = range.startContainer;
+  if (selection.focusNode) anchor = selection.focusNode;
+  const startEl =
+    anchor?.nodeType === Node.ELEMENT_NODE ? (anchor as Element) : anchor?.parentElement ?? null;
+  let cur: Element | null = startEl;
+  while (cur && cur !== boundary) {
+    const explicit = normalizeFontWeight((cur as HTMLElement).style?.fontWeight ?? '');
+    if (explicit) return explicit;
+    const tag = cur.tagName.toLowerCase();
+    if (tag === 'strong' || tag === 'b') return '700';
+    cur = cur.parentElement;
+  }
+  return '400';
+}
+
 const EXEC_COMMAND: Readonly<Record<InlineFormat, string | null>> = {
   bold: 'bold',
   italic: 'italic',
@@ -115,6 +164,30 @@ function unwrap(el: HTMLElement): void {
   if (!parent) return;
   while (el.firstChild) parent.insertBefore(el.firstChild, el);
   parent.removeChild(el);
+}
+
+function normalizeFontWeight(value: string): string | null {
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === 'normal') return '400';
+  if (trimmed === 'bold') return '700';
+  return /^(100|200|300|400|500|600|700|800|900)$/.test(trimmed) ? trimmed : null;
+}
+
+function stripFontWeight(node: Node): void {
+  if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node as HTMLElement;
+    el.style.fontWeight = '';
+    if (el.getAttribute('style') === '') el.removeAttribute('style');
+  }
+  for (const child of Array.from(node.childNodes)) stripFontWeight(child);
+}
+
+function wrapFragmentWithFontWeight(fragment: DocumentFragment, weight: string): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.style.fontWeight = weight;
+  span.appendChild(fragment);
+  return span;
 }
 
 /** Apply a link to the current selection. Empty URL ⇒ unlink. */

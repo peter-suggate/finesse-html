@@ -15,6 +15,9 @@ export interface RunSelectedElementAgentOpts {
   offsetMap: OffsetMap;
   selection: ElementSelectionSnapshot;
   userPrompt: string;
+  /** Receive status/output lines so callers can render them inline (e.g. webview popover). */
+  onStatus?: (text: string) => void;
+  onOutput?: (text: string) => void;
 }
 
 const output = vscode.window.createOutputChannel('Finesse Agent');
@@ -43,18 +46,19 @@ export async function runSelectedElementAgent(
   output.appendLine('[status] Checking Cursor Agent credentials...');
 
   const credentials = new AgentCredentialStore(opts.context);
-  const apiKey = await credentials.ensureApiKey(opts.providerId);
+  // Use getApiKey, not ensureApiKey — the inline popover flow is in charge of
+  // collecting a missing key. Surfacing the modal here would bring back the
+  // exact UX we're removing.
+  const apiKey = await credentials.getApiKey(opts.providerId);
   if (!apiKey) {
-    output.appendLine('[status] No Cursor Agent API key is configured. Agent run cancelled before any SDK call.');
-    output.appendLine(
-      '[status] Use "Finesse: Connect Cursor Agent" or set CURSOR_API_KEY and reload Cursor.',
-    );
-    void vscode.window.showInformationMessage(
-      'Finesse did not run Cursor Agent because no API key is configured.',
-    );
-    return;
+    const reason = 'Cursor Agent API key is not configured.';
+    output.appendLine(`[status] ${reason}`);
+    opts.onStatus?.(reason);
+    throw new Error(reason);
   }
-  output.appendLine(`[status] Using Cursor Agent API key from ${apiKey.source}.`);
+  const sourceNote = `Using Cursor Agent API key from ${apiKey.source}.`;
+  output.appendLine(`[status] ${sourceNote}`);
+  opts.onStatus?.(sourceNote);
 
   const request: AgentElementRequest = {
     providerId: opts.providerId,
@@ -68,9 +72,11 @@ export async function runSelectedElementAgent(
   await provider.runElementRequest(request, {
     status(message) {
       output.appendLine(`\n[status] ${message}`);
+      opts.onStatus?.(message);
     },
     output(message) {
       output.append(message);
+      opts.onOutput?.(message);
     },
   });
 }

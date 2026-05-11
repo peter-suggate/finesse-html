@@ -79,6 +79,28 @@ export type AgentSelectionState = {
   agentRunning: boolean;
 };
 
+export type AgentConnectionState = {
+  type: 'agentConnectionState';
+  providerId: 'cursor';
+  connected: boolean;
+  /** Where the key came from when connected. */
+  source?: 'secret' | 'environment';
+};
+
+export type AgentRunStatus = {
+  type: 'agentRunStatus';
+  providerId: 'cursor';
+  /**
+   * `starting`: agent run is initialising
+   * `output`: incremental assistant output (append `text` to the running log)
+   * `status`: a status line from the provider (status message)
+   * `done`: run finished successfully (final `text` is the result, if any)
+   * `error`: run failed (`text` is a human-readable message)
+   */
+  phase: 'starting' | 'status' | 'output' | 'done' | 'error';
+  text?: string;
+};
+
 export type HostMessage =
   | OffsetMap
   | Reload
@@ -86,7 +108,9 @@ export type HostMessage =
   | StaleCommit
   | FileMeta
   | DocumentState
-  | AgentSelectionState;
+  | AgentSelectionState
+  | AgentConnectionState
+  | AgentRunStatus;
 
 // ── Iframe → Host ─────────────────────────────────────────────────────────
 
@@ -138,6 +162,24 @@ export type EditBlockTag = {
   newTagName: string;
 };
 
+/**
+ * Surgically mutate one or more attributes on a single element. For each
+ * key in `attrs`:
+ *   - string value → set/replace the attribute
+ *   - null → remove the attribute
+ *   - missing key → leave untouched
+ *
+ * The host splices only the affected attribute spans; other attributes
+ * (including their original quoting and whitespace) are preserved verbatim.
+ * Newly added attributes are appended to the end of the opening tag.
+ */
+export type EditElementAttrs = {
+  type: 'editElementAttrs';
+  documentVersion: number;
+  elementId: number;
+  attrs: Record<string, string | null>;
+};
+
 export type RuntimeError = {
   type: 'runtimeError';
   message: string;
@@ -155,6 +197,38 @@ export type UndoRequest = { type: 'undoRequest' };
 /** Iframe asks host to redo the most recently undone edit. */
 export type RedoRequest = { type: 'redoRequest' };
 
+/** Iframe asks host to open the editor command palette. */
+export type CommandPaletteRequest = { type: 'commandPaletteRequest' };
+
+export interface ElementStyleSnapshot {
+  /** Raw `style="…"` attribute value, or null if absent. */
+  inlineStyle: string | null;
+  /** Subset of getComputedStyle(el) the side panel populates from. */
+  computed: {
+    display: string;
+    paddingTop: string;
+    paddingRight: string;
+    paddingBottom: string;
+    paddingLeft: string;
+    marginTop: string;
+    marginRight: string;
+    marginBottom: string;
+    marginLeft: string;
+    borderTopWidth: string;
+    borderTopStyle: string;
+    borderTopColor: string;
+    borderTopLeftRadius: string;
+    backgroundColor: string;
+    flexDirection: string;
+    justifyContent: string;
+    alignItems: string;
+    flexWrap: string;
+    rowGap: string;
+    gridTemplateColumns: string;
+    gridTemplateRows: string;
+  };
+}
+
 export type ElementSelectionSnapshot = {
   documentVersion: number;
   elementId: number;
@@ -170,6 +244,8 @@ export type ElementSelectionSnapshot = {
     width: number;
     height: number;
   };
+  /** Inline + computed styles for the side panel. */
+  styles: ElementStyleSnapshot;
 };
 
 export type ElementSelectionChanged = {
@@ -183,9 +259,50 @@ export type IframeMessage =
   | EditRemove
   | EditBlockHtml
   | EditBlockTag
+  | EditElementAttrs
   | RuntimeError
   | Ready
   | SaveRequest
   | UndoRequest
   | RedoRequest
+  | CommandPaletteRequest
   | ElementSelectionChanged;
+
+// ── Webview (chrome) → Iframe ─────────────────────────────────────────────
+//
+// Messages the surrounding webview chrome posts directly into the iframe,
+// without going through the extension host. Used by the right-hand style
+// panel: it asks the iframe to apply an attribute mutation locally
+// (optimistic DOM update) and forward the canonical edit commit to the host.
+
+export type PanelStyleEdit = {
+  type: 'panelStyleEdit';
+  documentVersion: number;
+  elementId: number;
+  attrs: Record<string, string | null>;
+};
+
+export type ChromeIframeMessage = PanelStyleEdit;
+
+/** Everything the iframe's window-message listener may receive. */
+export type IframeInboundMessage = HostMessage | ChromeIframeMessage;
+
+// ── Webview (chrome) → Host ───────────────────────────────────────────────
+
+/**
+ * Messages sent from the webview chrome (status bar, banners, popovers) to the
+ * host. The iframe sends {@link IframeMessage}s instead; these come from
+ * surrounding UI that lives in the webview itself.
+ */
+export type WebviewActionMessage =
+  | { type: '__webview_action'; action: 'editAnyway' }
+  | { type: '__webview_action'; action: 'save' }
+  | { type: '__webview_action'; action: 'discard' }
+  | { type: '__webview_action'; action: 'setAutoSave'; value: boolean }
+  | { type: '__webview_action'; action: 'undo' }
+  | { type: '__webview_action'; action: 'redo' }
+  | { type: '__webview_action'; action: 'commandPalette' }
+  | { type: '__webview_action'; action: 'openCursorDashboard' }
+  | { type: '__webview_action'; action: 'saveApiKey'; value: string }
+  | { type: '__webview_action'; action: 'forgetApiKey' }
+  | { type: '__webview_action'; action: 'runAgent'; value: string };

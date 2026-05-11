@@ -47,6 +47,22 @@ export class AgentCredentialStore {
     await this.context.secrets.delete(CURSOR_API_KEY_SECRET);
   }
 
+  /**
+   * Store an API key without any user-facing prompts. Used by the inline
+   * connect panel in the webview — the user already saw the instructions
+   * and pasted the key into the popover.
+   */
+  async setApiKey(providerId: AgentProviderId, value: string): Promise<void> {
+    if (providerId !== 'cursor') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    await this.context.secrets.store(CURSOR_API_KEY_SECRET, trimmed);
+  }
+
+  static get cursorDashboardUrl(): string {
+    return CURSOR_DASHBOARD_URL;
+  }
+
   async showStatus(providerId: AgentProviderId): Promise<void> {
     if (providerId !== 'cursor') return;
     const stored = await this.context.secrets.get(CURSOR_API_KEY_SECRET);

@@ -76,6 +76,14 @@ describe('computeBlockHtmlSplices — round trip via walkEditable', () => {
     expect(after).toBe('<html><body><p><a href="">click</a></p></body></html>');
   });
 
+  it('preserves sanitized font weight spans', () => {
+    const src = '<html><body><p>x</p></body></html>';
+    const after = commit(src, 0, '<span style="color: red; font-weight: 600">x</span>');
+    expect(after).toBe(
+      '<html><body><p><span style="font-weight: 600">x</span></p></body></html>',
+    );
+  });
+
   it('rejects unknown blockId', () => {
     const map = walkEditable('<html><body><p>x</p></body></html>', 1);
     const result = computeBlockHtmlSplices({

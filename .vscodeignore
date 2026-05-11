@@ -4,6 +4,8 @@ tests/
 e2e/
 scripts/
 test-results/
+.agent-hook-logs/
+.codex/
 tsconfig.json
 tsconfig.iframe.json
 tsconfig.webview.json

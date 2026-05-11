@@ -129,15 +129,9 @@ async function connectCursorAgent(context: vscode.ExtensionContext): Promise<voi
 }
 
 async function disconnectCursorAgent(context: vscode.ExtensionContext): Promise<void> {
-  const choice = await vscode.window.showWarningMessage(
-    'Remove the Cursor Agent API key stored by Finesse?',
-    { modal: true },
-    'Disconnect',
-  );
-  if (choice !== 'Disconnect') return;
   const credentials = new AgentCredentialStore(context);
   await credentials.clearApiKey('cursor');
-  void vscode.window.showInformationMessage('Cursor Agent is disconnected from Finesse.');
+  void vscode.window.showInformationMessage('Cursor Agent disconnected from Finesse.');
 }
 
 async function cursorAgentStatus(context: vscode.ExtensionContext): Promise<void> {

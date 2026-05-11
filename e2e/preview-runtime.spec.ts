@@ -41,6 +41,7 @@ test('edits the copied source, saves it, validates the file, then cleans up', as
     await waitForMessages(page, 'ready', 1);
 
     await page.locator('#lead-copy').click();
+    await expect(page.locator('#lead-copy')).toBeFocused();
     await expect(page.locator('#lead-copy')).toHaveAttribute('contenteditable', 'true');
     await page.keyboard.type(firstEdit);
     await page.keyboard.press('Enter');
@@ -55,6 +56,7 @@ test('edits the copied source, saves it, validates the file, then cleans up', as
     expect(harness.diskText()).toContain(firstEdit);
 
     await page.locator('#footer-copy').click();
+    await expect(page.locator('#footer-copy')).toBeFocused();
     await expect(page.locator('#footer-copy')).toHaveAttribute('contenteditable', 'true');
     await page.keyboard.type(secondEdit);
     await pressSaveShortcut(page);
@@ -130,6 +132,21 @@ test('selects an element and emits agent context without running an agent', asyn
     expect(message.selection?.outerHtmlPreview).toContain('id="lead-copy"');
     expect(message.selection?.selectorHints).toContain('#lead-copy');
     expect(message.selection?.domPath).toContain('body >');
+    await expect(page.locator('#lead-copy')).toHaveAttribute('contenteditable', 'true');
+    await expect(page.locator('#finesse-toolbar')).toHaveAttribute('data-visible', 'true');
+    await expect(page.locator('#finesse-delete')).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => {
+      const win = window as Window & {
+        __e2eMessages?: Array<{ type?: string; selection?: unknown }>;
+      };
+      return win.__e2eMessages?.some(
+        (candidate) => candidate.type === 'elementSelectionChanged' && candidate.selection === null,
+      );
+    });
+    await expect(page.locator('#lead-copy')).not.toBeFocused();
+    await expect(page.locator('#finesse-selection')).not.toBeVisible();
 
     const allMessages = await page.evaluate(() => {
       const win = window as Window & { __e2eMessages?: Array<{ type?: string }> };
@@ -141,7 +158,23 @@ test('selects an element and emits agent context without running an agent', asyn
   }
 });
 
-test('does not suppress native clicks on interactive preview elements', async ({ page }) => {
+test('forwards the command palette shortcut while the preview is focused', async ({ page }) => {
+  const harness = await createHarness(page);
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#lead-copy').click();
+    await expect(page.locator('#lead-copy')).toHaveAttribute('contenteditable', 'true');
+
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+P' : 'Control+Shift+P');
+    await waitForMessages(page, 'commandPaletteRequest', 1);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test('native-click bypass allows native clicks on interactive preview elements', async ({ page }) => {
   const harness = await createHarness(
     page,
     `<!doctype html>
@@ -156,11 +189,128 @@ test('does not suppress native clicks on interactive preview elements', async ({
       <summary><span>Open details</span></summary>
       <p>Accordion body</p>
     </details>
+    <details id="readonly-accordion">
+      <summary data-no-edit>Readonly details</summary>
+      <p>Readonly accordion body</p>
+    </details>
+    <button id="low-button" style="position: fixed; left: 20px; bottom: -20px; height: 80px">
+      <span>Low button</span>
+    </button>
     <div style="height: 1200px"></div>
     <section id="target">Target</section>
     <script>
       document.addEventListener('click', (event) => {
-        const button = event.target.closest('#phase-button');
+        const target =
+          event.target instanceof Element
+            ? event.target
+            : event.target?.parentNode instanceof Element
+              ? event.target.parentNode
+              : null;
+        const button = target?.closest('#phase-button');
+        if (button) document.body.dataset.phase = button.dataset.phase;
+      });
+      document.querySelector('#jump-link').addEventListener('click', (event) => {
+        document.body.dataset.jump = event.defaultPrevented ? 'prevented' : 'clicked';
+      });
+    </script>
+  </body>
+</html>`,
+  );
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#accordion summary span').hover();
+    await expect(page.locator('#finesse-native-click-hint')).toBeVisible();
+    await expect(page.locator('#finesse-native-click-hint')).toContainText('V');
+    await expect(page.locator('#finesse-native-click-hint')).toContainText('click');
+
+    await page.locator('#low-button').hover();
+    const lowHintPosition = await page.evaluate(() => {
+      const hint = document.querySelector('#finesse-native-click-hint')?.getBoundingClientRect();
+      const target = document.querySelector('#low-button')?.getBoundingClientRect();
+      return hint && target
+        ? {
+            hintBottom: hint.bottom,
+            hintLeft: hint.left,
+            targetBottom: target.bottom,
+            targetLeft: target.left,
+            viewportHeight: window.innerHeight,
+          }
+        : null;
+    });
+    expect(lowHintPosition).toBeTruthy();
+    expect(lowHintPosition!.targetBottom).toBeGreaterThan(lowHintPosition!.viewportHeight);
+    expect(lowHintPosition!.hintBottom).toBeLessThanOrEqual(lowHintPosition!.viewportHeight - 7);
+    expect(lowHintPosition!.hintLeft).toBeGreaterThanOrEqual(lowHintPosition!.targetLeft);
+    expect(lowHintPosition!.hintLeft).toBeLessThan(lowHintPosition!.targetLeft + 16);
+
+    await page.locator('#accordion summary span').click();
+    await expect(page.locator('#accordion')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#accordion summary span')).toBeFocused();
+    await expect(page.locator('#accordion summary span')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.press('Escape');
+
+    await page.locator('#readonly-accordion summary').click();
+    await expect(page.locator('#readonly-accordion')).not.toHaveAttribute('open', '');
+
+    await page.keyboard.down('v');
+    await page.locator('#accordion summary span').click();
+    await page.keyboard.up('v');
+    await expect(page.locator('#accordion')).toHaveAttribute('open', '');
+    await expect(page.locator('#accordion summary')).not.toHaveAttribute('contenteditable', 'true');
+
+    await page.keyboard.down('v');
+    await page.locator('#readonly-accordion summary').click();
+    await page.keyboard.up('v');
+    await expect(page.locator('#readonly-accordion')).toHaveAttribute('open', '');
+
+    await page.locator('#phase-button span').click();
+    await expect(page.locator('body')).not.toHaveAttribute('data-phase');
+    await expect(page.locator('#phase-button span')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.press('Escape');
+
+    await page.locator('#phase-button span').click({ modifiers: ['Alt'] });
+    await expect(page.locator('body')).not.toHaveAttribute('data-phase');
+    await expect(page.locator('#phase-button span')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.press('Escape');
+
+    await page.keyboard.down('v');
+    await page.locator('#phase-button span').click();
+    await page.keyboard.up('v');
+    await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');
+
+    await page.keyboard.down('v');
+    await page.locator('#jump-link span').click();
+    await page.keyboard.up('v');
+    await expect(page.locator('body')).toHaveAttribute('data-jump', 'clicked');
+    await expect(page.locator('#copy')).not.toHaveAttribute('contenteditable', 'true');
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test('edits nested text spans inside interactive controls', async ({ page }) => {
+  const harness = await createHarness(
+    page,
+    `<!doctype html>
+<html>
+  <body>
+    <button id="phase-button" class="nav-sub" data-phase="1c">
+      <span class="num">1C</span>
+      <span id="phase-name" class="name">Internal Engineering Rollout</span>
+      <span id="remove-me" class="who-line">self-onboard</span>
+    </button>
+    <p id="plain-copy">Plain editable copy</p>
+    <script>
+      document.addEventListener('click', (event) => {
+        const target =
+          event.target instanceof Element
+            ? event.target
+            : event.target?.parentNode instanceof Element
+              ? event.target.parentNode
+              : null;
+        const button = target?.closest('#phase-button');
         if (button) document.body.dataset.phase = button.dataset.phase;
       });
     </script>
@@ -171,16 +321,30 @@ test('does not suppress native clicks on interactive preview elements', async ({
     await page.goto(harness.url);
     await waitForMessages(page, 'ready', 1);
 
-    await page.locator('#accordion summary span').click();
-    await expect(page.locator('#accordion')).toHaveAttribute('open', '');
-    await expect(page.locator('#accordion summary')).not.toHaveAttribute('contenteditable', 'true');
+    await page.locator('#phase-name').click();
+    await expect(page.locator('body')).not.toHaveAttribute('data-phase');
+    await expect(page.locator('#phase-name')).toBeFocused();
+    await expect(page.locator('#phase-name')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.insertText(' edited');
+    await page.keyboard.press('Enter');
+    await waitForMessages(page, 'editCommit', 1);
+    await expect(page.locator('#phase-name')).toHaveText('Internal Engineering Rollout edited');
+    await expect(page.locator('body')).not.toHaveAttribute('data-phase');
 
-    await page.locator('#phase-button span').click();
-    await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');
+    await page.locator('#plain-copy').click();
+    await expect(page.locator('#plain-copy')).toBeFocused();
+    await expect(page.locator('#plain-copy')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.press('Escape');
 
-    await page.locator('#jump-link span').click();
-    await page.waitForFunction(() => window.location.hash === '#target');
-    await expect(page.locator('#copy')).not.toHaveAttribute('contenteditable', 'true');
+    await page.locator('#remove-me').click();
+    await expect(page.locator('body')).not.toHaveAttribute('data-phase');
+    await expect(page.locator('#remove-me')).toBeFocused();
+    await expect(page.locator('#remove-me')).toHaveAttribute('contenteditable', 'true');
+    await expect(page.locator('#finesse-toolbar')).toHaveAttribute('data-visible', 'true');
+    await expect(page.locator('#finesse-toolbar button[aria-label="Delete element"]')).toBeVisible();
+    await page.locator('#finesse-toolbar button[aria-label="Delete element"]').click();
+    await waitForMessages(page, 'editRemove', 1);
+    await expect(page.locator('#remove-me')).toHaveCount(0);
   } finally {
     await harness.dispose();
   }
@@ -344,7 +508,8 @@ async function installMessageRecorder(page: Page): Promise<void> {
         type === 'editRemove' ||
         type === 'saveRequest' ||
         type === 'undoRequest' ||
-        type === 'redoRequest'
+        type === 'redoRequest' ||
+        type === 'commandPaletteRequest'
       );
     }
   });

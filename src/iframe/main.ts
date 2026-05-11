@@ -1,5 +1,11 @@
-import type { FileMeta, HostMessage, IframeMessage, OffsetMap } from '../shared/protocol';
+import type {
+  FileMeta,
+  IframeInboundMessage,
+  IframeMessage,
+  OffsetMap,
+} from '../shared/protocol';
 import { setupEditSession, type EditSession } from './editSession';
+import { setupHelpPanel } from './helpPanel';
 import { setupOverlay } from './overlay';
 import { setupFormatToolbar } from './toolbar';
 import { makeDefaultActionHandler, makeDefaultRefreshHandler } from './toolbar/wiring';
@@ -40,6 +46,7 @@ function start(): void {
     onError: reportError,
   });
   setupOverlay({ session });
+  setupHelpPanel(session);
   setupFormatToolbar({
     session,
     onAction: makeDefaultActionHandler({ session }),
@@ -86,7 +93,7 @@ function setupReloadSocket(path: string): void {
 
 function setupHostMessageListener(session: EditSession): void {
   window.addEventListener('message', (event: MessageEvent) => {
-    const data = event.data as HostMessage | undefined;
+    const data = event.data as IframeInboundMessage | undefined;
     if (!data || typeof data !== 'object' || typeof (data as { type?: unknown }).type !== 'string') return;
     switch (data.type) {
       case 'offsetMap':
@@ -105,6 +112,11 @@ function setupHostMessageListener(session: EditSession): void {
       case 'fileMeta':
         session.applyFileMeta(data);
         break;
+      case 'panelStyleEdit': {
+        const el = session.findElementById(data.elementId);
+        if (el) session.applyStyleEdit(el, data.attrs);
+        break;
+      }
     }
   });
 }

@@ -48,6 +48,18 @@ describe('sanitizeBlockHtml', () => {
     expect(out).not.toContain('onclick');
   });
 
+  it('keeps only safe span font-weight styles', () => {
+    expect(sanitizeBlockHtml('<span style="font-weight: 600">semi</span>')).toBe(
+      '<span style="font-weight: 600">semi</span>',
+    );
+    expect(sanitizeBlockHtml('<span style="color: red; font-weight: bold">bold</span>')).toBe(
+      '<span style="font-weight: 700">bold</span>',
+    );
+    expect(sanitizeBlockHtml('<span style="font-weight: 950">bad</span>')).toBe(
+      '<span>bad</span>',
+    );
+  });
+
   it('keeps href on <a> but blanks unsafe schemes', () => {
     expect(sanitizeBlockHtml('<a href="javascript:alert(1)">x</a>')).toBe(
       '<a href="">x</a>',

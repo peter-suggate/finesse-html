@@ -25,6 +25,7 @@ export const DEFAULT_ALLOWED_INLINE_TAGS: ReadonlySet<string> = new Set([
  */
 export const DEFAULT_ALLOWED_ATTRS: Readonly<Record<string, ReadonlySet<string>>> = {
   a: new Set(['href', 'title', 'target', 'rel']),
+  span: new Set(['style']),
 };
 
 const URL_ATTRS: ReadonlySet<string> = new Set(['href', 'src']);
@@ -98,7 +99,11 @@ function walk(
     node.attrs = node.attrs.filter((a) => {
       const name = a.name.toLowerCase();
       if (stripDataAttrs && name.startsWith('data-')) return false;
-      if (name === 'style' || name === 'class' || name === 'id') return false;
+      if (name === 'style') {
+        a.value = sanitizeStyleAttr(tag, a.value);
+        return a.value !== '' && allowed.has(name);
+      }
+      if (name === 'class' || name === 'id') return false;
       if (name.startsWith('on')) return false;
       if (!allowed.has(name)) return false;
       if (URL_ATTRS.has(name) && !isSafeUrl(a.value)) {
@@ -110,6 +115,24 @@ function walk(
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
+
+function sanitizeStyleAttr(tag: string, value: string): string {
+  if (tag !== 'span') return '';
+  const fontWeight = value
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.toLowerCase().startsWith('font-weight:'));
+  if (!fontWeight) return '';
+  const rawValue = fontWeight.slice(fontWeight.indexOf(':') + 1).trim().toLowerCase();
+  const normalized = normalizeFontWeight(rawValue);
+  return normalized ? `font-weight: ${normalized}` : '';
+}
+
+function normalizeFontWeight(value: string): string | null {
+  if (value === 'normal') return '400';
+  if (value === 'bold') return '700';
+  return /^(100|200|300|400|500|600|700|800|900)$/.test(value) ? value : null;
+}
 
 /** Replace `node` with its children in `node.parentNode`. */
 function unwrap(node: FragmentNode): void {

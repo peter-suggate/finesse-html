@@ -23,6 +23,7 @@ export const BLOCK_TAGS: ReadonlySet<string> = new Set([
   'td',
   'th',
   'caption',
+  'span',
 ]);
 
 export const NON_EDITABLE_PARENT_TAGS: ReadonlySet<string> = new Set([

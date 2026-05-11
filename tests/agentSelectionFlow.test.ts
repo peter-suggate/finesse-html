@@ -3,7 +3,22 @@ import { describe, expect, it } from 'vitest';
 import { buildElementSourceReference } from '../src/host/agent/selection';
 import { buildCursorElementPrompt } from '../src/host/agent/providers/cursor';
 import { walkEditable } from '../src/host/parse/walkEditable';
-import type { ElementSelectionSnapshot } from '../src/shared/protocol';
+import type { ElementSelectionSnapshot, ElementStyleSnapshot } from '../src/shared/protocol';
+
+const EMPTY_STYLES: ElementStyleSnapshot = {
+  inlineStyle: null,
+  computed: {
+    display: 'block',
+    paddingTop: '0px', paddingRight: '0px', paddingBottom: '0px', paddingLeft: '0px',
+    marginTop: '0px', marginRight: '0px', marginBottom: '0px', marginLeft: '0px',
+    borderTopWidth: '0px', borderTopStyle: 'none', borderTopColor: 'rgb(0, 0, 0)',
+    borderTopLeftRadius: '0px',
+    backgroundColor: 'rgba(0, 0, 0, 0)',
+    flexDirection: 'row', justifyContent: 'normal', alignItems: 'normal', flexWrap: 'nowrap',
+    rowGap: 'normal',
+    gridTemplateColumns: 'none', gridTemplateRows: 'none',
+  },
+};
 
 function textDocument(source: string): vscode.TextDocument {
   return {
@@ -46,6 +61,7 @@ describe('agent selected-element context flow', () => {
       textPreview: 'Start trial',
       outerHtmlPreview: '<button class="primary" aria-label="Start trial">Start trial</button>',
       rect: { x: 10, y: 20, width: 120, height: 32 },
+      styles: EMPTY_STYLES,
     };
 
     const element = buildElementSourceReference({
@@ -98,6 +114,7 @@ describe('agent selected-element context flow', () => {
           textPreview: 'Go',
           outerHtmlPreview: '<button>Go</button>',
           rect: { x: 0, y: 0, width: 1, height: 1 },
+          styles: EMPTY_STYLES,
         },
       }),
     ).toThrow(/stale/i);

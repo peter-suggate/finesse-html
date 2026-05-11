@@ -3,6 +3,7 @@ import type {
   EditBlockHtml,
   EditBlockTag,
   EditCommit,
+  EditElementAttrs,
   EditRemove,
   OffsetMap,
 } from '../shared/protocol';
@@ -11,6 +12,7 @@ import {
   computeBlockTagSplices,
 } from './blockTagTransform';
 import { computeBlockHtmlSplices } from './computeBlockHtmlSplices';
+import { computeAttrEditSplices } from './computeAttrEditSplices';
 import {
   computeInverseSplices,
   type SpliceOp,
@@ -59,6 +61,15 @@ export interface ApplyBlockTagOpts {
   currentOffsetMap: OffsetMap | null;
   commit: EditBlockTag;
   beforeApply: (expectedVersion: number) => void;
+}
+
+export interface ApplyAttrEditOpts {
+  document: vscode.TextDocument;
+  currentVersion: number;
+  currentOffsetMap: OffsetMap | null;
+  commit: EditElementAttrs;
+  beforeApply: (expectedVersion: number) => void;
+  escapeReplacement?: ReplacementEscaper;
 }
 
 export type ApplyEditResult =
@@ -378,6 +389,64 @@ export async function applyBlockTagCommit(opts: ApplyBlockTagOpts): Promise<Appl
       expected: commit.documentVersion,
       actual: document.version,
     };
+  }
+
+  const applied = await applySplicesWithInverse(document, splices, opts.beforeApply);
+  if (!applied.ok) return applied;
+  return { ok: true, newVersion: document.version, undoEntry: applied.entry };
+}
+
+export async function applyAttrEditCommit(opts: ApplyAttrEditOpts): Promise<ApplyEditResult> {
+  const { document, currentVersion, currentOffsetMap, commit } = opts;
+  if (!currentOffsetMap) {
+    return {
+      ok: false,
+      reason: 'no-offsets',
+      expected: commit.documentVersion,
+      actual: currentVersion,
+    };
+  }
+  if (commit.documentVersion !== currentVersion || document.version !== currentVersion) {
+    return {
+      ok: false,
+      reason: 'stale',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+  const element = currentOffsetMap.elements.find((e) => e.elementId === commit.elementId);
+  if (!element) {
+    return {
+      ok: false,
+      reason: 'no-offsets',
+      expected: commit.documentVersion,
+      actual: currentVersion,
+    };
+  }
+
+  const result = computeAttrEditSplices({
+    source: document.getText(),
+    elementStart: element.startOffset,
+    attrs: commit.attrs,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: 'apply-failed',
+      expected: commit.documentVersion,
+      actual: document.version,
+    };
+  }
+
+  const escape = opts.escapeReplacement ?? identity;
+  const splices: SpliceOp[] = result.splices.map((op) => ({
+    startOffset: op.startOffset,
+    endOffset: op.endOffset,
+    replacement: escape(op.replacement),
+  }));
+
+  if (splices.length === 0) {
+    return { ok: true, newVersion: currentVersion, undoEntry: emptyUndoEntry(currentVersion) };
   }
 
   const applied = await applySplicesWithInverse(document, splices, opts.beforeApply);

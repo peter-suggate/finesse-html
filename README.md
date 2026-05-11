@@ -32,7 +32,7 @@ Or via the UI: Extensions panel → `⋯` (More Actions) → **Install from VSIX
 4. Hover an element — blue outline.
 5. Click — solid outline, block becomes editable, cursor lands at the end.
 6. Type. Then:
-   - **Enter** or **click outside** — commit. The source file becomes dirty in VS Code; `Cmd+S` saves it.
+   - **Enter** or **click outside** — commit. Finesse saves the source file automatically; turn off **Auto-save** in the preview status bar if you want to save manually with `Cmd+S`.
    - **Escape** — revert and exit.
 
 You can also tab between editable blocks (`Tab` / `Shift+Tab`) and press `Enter` to begin editing the focused block.
