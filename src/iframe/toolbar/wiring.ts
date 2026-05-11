@@ -104,14 +104,7 @@ export function makeDefaultActionHandler(opts: DefaultWiringOpts): ToolbarAction
         if (!value) return;
         const tag = value.toLowerCase();
         if (!BLOCK_TAG_OPTIONS.has(tag)) return;
-        const currentTag = ctx.block.tagName.toLowerCase();
-        if (currentTag === tag) {
-          session.setPendingTag(null);
-          return;
-        }
-        // Stage the rename so it commits atomically with any pending text/
-        // formatting edits (commitEdit runs on Enter / click-out).
-        session.setPendingTag(tag);
+        session.applyActiveBlockTag(tag);
         return;
       }
     }

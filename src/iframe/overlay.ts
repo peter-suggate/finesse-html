@@ -345,7 +345,13 @@ export function setupOverlay(opts: OverlayOpts): void {
     }
     if (session.hasActiveBlock()) {
       // In edit mode: never intercept Delete/Backspace — let contentEditable handle them.
-      if (e.key === 'Escape') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'a') {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && session.isInsideActive(active)) {
+          e.preventDefault();
+          selectActiveBlockContents(session.activeBlockElement());
+        }
+      } else if (e.key === 'Escape') {
         e.preventDefault();
         session.cancelEdit();
         session.announceElementSelection(null);
@@ -522,6 +528,16 @@ function elementFromEventTarget(target: EventTarget | null): Element | null {
 
 function isCommandPaletteShortcut(e: KeyboardEvent): boolean {
   return (e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p';
+}
+
+function selectActiveBlockContents(block: HTMLElement | null): void {
+  if (!block) return;
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(block);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 function isTextEntryTarget(target: Element | null): boolean {

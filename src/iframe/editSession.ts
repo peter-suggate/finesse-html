@@ -142,6 +142,8 @@ export interface EditSession {
   setPendingTag(tag: string | null): void;
   /** Currently staged tag, or null. */
   pendingTag(): string | null;
+  /** Retag the active block in the live DOM and stage the source rename. */
+  applyActiveBlockTag(tag: string): boolean;
 }
 
 export interface SetupOpts {
@@ -658,6 +660,42 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     return pendingNewTag;
   }
 
+  function applyActiveBlockTag(tag: string): boolean {
+    if (!activeBlock || activeBlockId === null || !offsetMap) return false;
+    const nextTag = tag.toLowerCase();
+    if (!BLOCK_TAGS.has(nextTag)) return false;
+    const sourceBlock = offsetMap.blocks.find((b) => b.blockId === activeBlockId);
+    if (!sourceBlock) return false;
+
+    pendingNewTag = nextTag === sourceBlock.tagName.toLowerCase() ? null : nextTag;
+    if (activeBlock.tagName.toLowerCase() === nextTag) return true;
+
+    const replacement = document.createElement(nextTag);
+    for (const attr of Array.from(activeBlock.attributes)) {
+      replacement.setAttribute(attr.name, attr.value);
+    }
+    while (activeBlock.firstChild) {
+      replacement.appendChild(activeBlock.firstChild);
+    }
+    activeBlock.replaceWith(replacement);
+
+    const oldBlock = activeBlock;
+    activeBlock = replacement;
+    blockIdToElement.set(activeBlockId, replacement);
+    elementToBlockId.delete(oldBlock);
+    elementToBlockId.set(replacement, activeBlockId);
+    const elementId = elementToElementId.get(oldBlock);
+    if (elementId !== undefined) {
+      elementToElementId.delete(oldBlock);
+      elementToElementId.set(replacement, elementId);
+      elementIdToElement.set(elementId, replacement);
+    }
+    replacement.focus({ preventScroll: true });
+    notifyState({ kind: 'editing', block: replacement, blockId: activeBlockId });
+    announceElementSelection(replacement);
+    return true;
+  }
+
   function sendAttrEditCommit(el: HTMLElement, attrs: Record<string, string | null>): boolean {
     if (!offsetMap) return false;
     const elementId = elementToElementId.get(el);
@@ -766,6 +804,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     sendBlockTagCommit,
     setPendingTag,
     pendingTag,
+    applyActiveBlockTag,
     sendAttrEditCommit,
     selectedElement,
     onSelectionChange,

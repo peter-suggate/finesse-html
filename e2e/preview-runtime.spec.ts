@@ -174,6 +174,75 @@ test('forwards the command palette shortcut while the preview is focused', async
   }
 });
 
+test('select-all while editing selects only the active element text', async ({ page }) => {
+  const harness = await createHarness(
+    page,
+    `<!doctype html>
+<html>
+  <body>
+    <p id="copy">Original <strong>rich</strong> text</p>
+    <p id="sibling">Sibling text</p>
+  </body>
+</html>`,
+  );
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#copy').click();
+    await expect(page.locator('#copy')).toHaveAttribute('contenteditable', 'true');
+
+    await pressSelectAllShortcut(page);
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString()))
+      .toBe('Original rich text');
+
+    await page.keyboard.type('Replacement text');
+    await page.keyboard.press('Enter');
+    await waitForMessages(page, 'editBlockHtml', 1);
+
+    await expect(page.locator('#copy')).toHaveText('Replacement text');
+    await expect(page.locator('#sibling')).toHaveText('Sibling text');
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test('block style select retags the active editable element', async ({ page }) => {
+  const harness = await createHarness(
+    page,
+    `<!doctype html>
+<html>
+  <body>
+    <p id="copy" class="lede">Original text</p>
+    <p id="sibling">Sibling text</p>
+  </body>
+</html>`,
+  );
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#copy').click();
+    await expect(page.locator('#copy')).toHaveAttribute('contenteditable', 'true');
+    await page.locator('#finesse-toolbar select[aria-label="Block style"]').selectOption('h1');
+
+    await expect(page.locator('h1#copy.lede')).toHaveText('Original text');
+    await expect(page.locator('#copy')).toBeFocused();
+    await expect(page.locator('#sibling')).toHaveText('Sibling text');
+
+    await page.keyboard.press('Enter');
+    await waitForMessages(page, 'editBlockTag', 1);
+    await pressSaveShortcut(page);
+    await waitForMessages(page, 'saveRequest', 1);
+
+    expect(harness.diskText()).toContain('<h1 id="copy" class="lede">Original text</h1>');
+    expect(harness.diskText()).toContain('<p id="sibling">Sibling text</p>');
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test('native-click bypass allows native clicks on interactive preview elements', async ({ page }) => {
   const harness = await createHarness(
     page,
@@ -542,6 +611,10 @@ async function pressUndoShortcut(page: Page): Promise<void> {
 
 async function pressRedoShortcut(page: Page): Promise<void> {
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+Z' : 'Control+Shift+Z');
+}
+
+async function pressSelectAllShortcut(page: Page): Promise<void> {
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
 }
 
 interface SourceApplyResult {
