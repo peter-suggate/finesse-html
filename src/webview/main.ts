@@ -11,10 +11,12 @@ import type {
 import { setupSidePanel, type SidePanelController } from './stylePanel';
 import { setupAgentPanel, type AgentPanelController } from './agentPanel';
 import {
+  dismissPreviewLoadErrorBanner,
   dismissUnsavedChangesBanner,
   dismissAll,
   initBanners,
   showEditFailedBanner,
+  showPreviewLoadErrorBanner,
   showRuntimeErrorBanner,
   showStaleReloadBanner,
   showTemplatedBanner,
@@ -112,7 +114,50 @@ function bootIframe(init: InitData): void {
   }
   const frame: HTMLIFrameElement = found;
   const iframeOrigin = new URL(init.iframeUrl).origin;
-  frame.src = init.iframeUrl;
+  let readyReceived = false;
+  let probeScheduled = false;
+
+  function loadFrame(): void {
+    dismissPreviewLoadErrorBanner();
+    readyReceived = false;
+    probeScheduled = false;
+    frame.src = init.iframeUrl;
+    window.setTimeout(() => {
+      if (!readyReceived) void probePreviewUrl();
+    }, 3000);
+  }
+
+  async function probePreviewUrl(): Promise<void> {
+    if (readyReceived || probeScheduled) return;
+    probeScheduled = true;
+    try {
+      const res = await fetch(init.iframeUrl, { cache: 'no-store' });
+      if (readyReceived) return;
+      if (res.ok) return;
+      const body = await res.text().catch(() => '');
+      showPreviewLoadErrorBanner({
+        status: res.status,
+        detail: body || res.statusText,
+        iframeUrl: init.iframeUrl,
+        onRetry: loadFrame,
+      });
+    } catch (err) {
+      if (readyReceived) return;
+      const message = err instanceof Error ? err.message : String(err);
+      showPreviewLoadErrorBanner({
+        status: 0,
+        detail: `couldn't reach preview server at ${init.iframeUrl} (${message})`,
+        iframeUrl: init.iframeUrl,
+        onRetry: loadFrame,
+      });
+    }
+  }
+
+  frame.addEventListener('error', () => {
+    void probePreviewUrl();
+  });
+
+  loadFrame();
 
   // Mount the right-hand side dock: style panel on top (fills available space),
   // agent panel pinned to the bottom. The style panel posts PanelStyleEdit
@@ -169,6 +214,10 @@ function bootIframe(init: InitData): void {
 
   function handleIframeMessage(data: unknown): void {
     if (!isIframeMessage(data)) return;
+    if (data.type === 'ready') {
+      readyReceived = true;
+      dismissPreviewLoadErrorBanner();
+    }
     if (data.type === 'runtimeError') {
       showRuntimeErrorBanner(data.message);
     }

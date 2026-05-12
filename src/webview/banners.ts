@@ -101,6 +101,34 @@ export function showRuntimeErrorBanner(message: string): void {
   container.appendChild(banner);
 }
 
+export function showPreviewLoadErrorBanner(opts: {
+  status: number;
+  detail: string;
+  iframeUrl: string;
+  onRetry?: () => void;
+}): void {
+  if (!container) return;
+  container
+    .querySelectorAll('[data-kind="preview-load-error"]')
+    .forEach((existing) => existing.remove());
+  const statusLabel = opts.status > 0 ? `HTTP ${opts.status}` : 'connection failed';
+  const detail = opts.detail.trim().slice(0, 400) || '(no response body)';
+  const banner = build({
+    kind: 'error',
+    dataKind: 'preview-load-error',
+    text: `Preview didn't load (${statusLabel}): ${detail}`,
+    action: opts.onRetry ? { label: 'Retry', onClick: opts.onRetry } : undefined,
+  });
+  container.appendChild(banner);
+}
+
+export function dismissPreviewLoadErrorBanner(): void {
+  if (!container) return;
+  container
+    .querySelectorAll('[data-kind="preview-load-error"]')
+    .forEach((existing) => existing.remove());
+}
+
 export function showEditFailedBanner(message: string): void {
   if (!container) return;
   container

@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentCredentialStore } from './agent/credentials';
 import type { ResolvedConfig } from './config';
@@ -47,6 +48,14 @@ export function isPreviewableLanguage(languageId: string): boolean {
   return PREVIEWABLE_LANGUAGES.has(languageId);
 }
 
+function isInsideWorkspace(workspaceRoot: string, fsPath: string): boolean {
+  const rel = path.relative(workspaceRoot, fsPath);
+  if (rel === '') return true;
+  if (rel.startsWith('..')) return false;
+  if (path.isAbsolute(rel)) return false;
+  return true;
+}
+
 async function openPreview(
   extContext: vscode.ExtensionContext,
   ctx: CommandsContext,
@@ -67,7 +76,35 @@ async function openPreview(
   }
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
-    void vscode.window.showErrorMessage('Open a workspace folder before previewing.');
+    const parent = path.dirname(doc.uri.fsPath);
+    const choice = await vscode.window.showErrorMessage(
+      'Finesse needs an open workspace folder — the preview server only serves files under a workspace root.',
+      'Open Containing Folder',
+    );
+    if (choice === 'Open Containing Folder') {
+      await vscode.commands.executeCommand(
+        'vscode.openFolder',
+        vscode.Uri.file(parent),
+        { forceNewWindow: false },
+      );
+    }
+    return;
+  }
+  if (!isInsideWorkspace(workspaceRoot, doc.uri.fsPath)) {
+    const fileName = path.basename(doc.uri.fsPath);
+    const parent = path.dirname(doc.uri.fsPath);
+    const rootName = path.basename(workspaceRoot);
+    const choice = await vscode.window.showErrorMessage(
+      `Finesse can't preview "${fileName}" — it sits outside the workspace folder "${rootName}". The preview server only serves files under the workspace root.`,
+      'Open Containing Folder',
+    );
+    if (choice === 'Open Containing Folder') {
+      await vscode.commands.executeCommand(
+        'vscode.openFolder',
+        vscode.Uri.file(parent),
+        { forceNewWindow: false },
+      );
+    }
     return;
   }
   const server = await ctx.ensureServer();
