@@ -782,7 +782,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     applyCssOptimistic(document, input.selector, input.property, input.value);
     opts.postToParent({
       type: 'editCssDeclaration',
-      documentVersion: input.documentVersion,
+      documentVersion: offsetMap.documentVersion,
       selector: input.selector,
       property: input.property,
       value: input.value,

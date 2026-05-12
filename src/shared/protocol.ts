@@ -36,7 +36,7 @@ export type OffsetMap = {
 
 export type Reload = {
   type: 'reload';
-  reason: 'external-edit' | 'stale-commit' | 'config-changed';
+  reason: 'external-edit' | 'stale-commit' | 'config-changed' | 'discard';
 };
 
 export type EditAck = {

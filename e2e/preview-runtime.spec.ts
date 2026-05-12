@@ -231,6 +231,58 @@ test('selection exposes only same-document style rules as editable class rules',
   }
 });
 
+test('CSS declaration edits use the refreshed iframe document version', async ({ page }) => {
+  const harness = await createHarness(
+    page,
+    `<!doctype html>
+<html>
+  <head>
+    <style>.local { color: red; }</style>
+  </head>
+  <body>
+    <p id="copy" class="local">Editable copy</p>
+  </body>
+</html>`,
+  );
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    const offsetMap = await page.evaluate(() => {
+      const win = window as Window & { __FINESSE__?: { offsetMap?: OffsetMap } };
+      return win.__FINESSE__?.offsetMap;
+    });
+    expect(offsetMap).toBeTruthy();
+
+    await page.evaluate((map) => {
+      window.postMessage({ ...map, documentVersion: 2 }, '*');
+    }, offsetMap);
+    await page.evaluate(() => {
+      window.postMessage(
+        {
+          type: 'panelCssEdit',
+          documentVersion: 1,
+          selector: '.local',
+          property: 'color',
+          value: 'blue',
+        },
+        '*',
+      );
+    });
+
+    const messages = await waitForMessages(page, 'editCssDeclaration', 1);
+    expect(messages.at(-1)).toMatchObject({
+      type: 'editCssDeclaration',
+      documentVersion: 2,
+      selector: '.local',
+      property: 'color',
+      value: 'blue',
+    });
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test('forwards the command palette shortcut while the preview is focused', async ({ page }) => {
   const harness = await createHarness(page);
   try {

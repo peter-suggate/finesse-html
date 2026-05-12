@@ -220,20 +220,26 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     );
     if (choice !== 'Discard') return;
     try {
-      // Some VS Code / Cursor builds accept a URI arg; try that first.
-      await vscode.commands.executeCommand('workbench.action.files.revert', document.uri);
-    } catch {
-      try {
-        // Fallback: focus the document briefly so the active-editor revert finds it.
-        await vscode.window.showTextDocument(document, {
-          preserveFocus: true,
-          preview: false,
-        });
-        await vscode.commands.executeCommand('workbench.action.files.revert');
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        void vscode.window.showErrorMessage(`Finesse discard failed: ${message}`);
+      await revertActiveDocument(document);
+      await waitForDocumentClean(document);
+      if (document.isDirty) {
+        throw new Error('VS Code did not revert the file');
       }
+      editHistory.clear();
+      currentAgentSelection = null;
+      reparse(document.getText(), document.version);
+      const fm: FileMeta = { type: 'fileMeta', path: relativePath, isTemplated };
+      if (currentOffsetMap) panel.webview.postMessage(currentOffsetMap);
+      panel.webview.postMessage(fm);
+      panel.webview.postMessage({ type: 'reload', reason: 'discard' });
+      panel.reveal(panel.viewColumn ?? vscode.ViewColumn.Beside, false);
+    } catch (err) {
+      expectedSelfEditVersion = null;
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`Finesse discard failed: ${message}`);
+    } finally {
+      postDocumentState();
+      postAgentSelectionState();
     }
   }
 
@@ -495,13 +501,6 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
             expectedVersion: result.expected,
             actualVersion: result.actual,
           });
-        } else {
-          panel.webview.postMessage({
-            type: 'editFailed',
-            message:
-              'That CSS rule could not be saved. Finesse can currently save class-rule edits only when the rule lives in a <style> block in this file.',
-          });
-          postDocumentState();
         }
       } else {
         recordIfNonEmpty(result.undoEntry, 'Attribute edit', sourceBefore);
@@ -535,6 +534,13 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
             expectedVersion: result.expected,
             actualVersion: result.actual,
           });
+        } else {
+          panel.webview.postMessage({
+            type: 'editFailed',
+            message:
+              'That CSS rule could not be saved. Finesse can currently save class-rule edits only when the rule lives in a <style> block in this file.',
+          });
+          postDocumentState();
         }
       } else {
         recordIfNonEmpty(result.undoEntry, 'CSS edit', sourceBefore);
@@ -776,6 +782,43 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 function selectionLabel(selection: ElementSelectionSnapshot): string {
   const text = selection.textPreview ? ` "${selection.textPreview.slice(0, 40)}"` : '';
   return `<${selection.tagName}>${text}`;
+}
+
+async function revertActiveDocument(document: vscode.TextDocument): Promise<void> {
+  // VS Code's revert command targets the active editor; URI args are ignored by
+  // current VS Code/Cursor builds, so the source editor must be focused first.
+  await vscode.window.showTextDocument(document, {
+    preserveFocus: false,
+    preview: false,
+  });
+  await vscode.commands.executeCommand('workbench.action.files.revert');
+}
+
+async function waitForDocumentClean(
+  document: vscode.TextDocument,
+  timeoutMs = 500,
+): Promise<void> {
+  if (!document.isDirty) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      changeSub.dispose();
+      saveSub.dispose();
+      resolve();
+    };
+    const matches = (doc: vscode.TextDocument): boolean =>
+      doc.uri.toString() === document.uri.toString();
+    const timer = setTimeout(done, timeoutMs);
+    const changeSub = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (matches(event.document) && !event.document.isDirty) done();
+    });
+    const saveSub = vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (matches(doc) && !doc.isDirty) done();
+    });
+  });
 }
 
 function humanizeAgentError(message: string): string {
