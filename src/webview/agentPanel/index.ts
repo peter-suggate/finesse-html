@@ -1,17 +1,21 @@
 /**
  * Inline Ask Agent panel — pinned to the bottom of the side dock.
  *
- * One panel, three modes:
- *   - `connect` — no API key stored. Inline key input + dashboard link.
+ * Header: provider toggle (Cursor / Claude Code).
+ * Body modes:
+ *   - `connect` — provider needs a credential we don't yet have. Inline key
+ *     input (Cursor) or subscription-login hint (Claude Code).
  *   - `prompt`  — connected and an element is selected; show prompt textarea.
  *   - `run`     — agent run in flight, finished, or errored; show streaming log.
  *
  * Themed with VS Code CSS variables to match the surrounding chrome.
  */
 
+export type AgentProviderId = 'cursor' | 'claude-code';
 export type AgentConnectionSource = 'secret' | 'environment';
 
 export interface AgentPanelState {
+  providerId: AgentProviderId;
   connected: boolean;
   connectionSource?: AgentConnectionSource;
   selectedLabel?: string;
@@ -24,8 +28,10 @@ export interface AgentPanelState {
 
 export interface AgentPanelActions {
   onOpenDashboard: () => void;
+  onOpenClaudeDocs: () => void;
   onSaveApiKey: (value: string) => void;
   onForgetApiKey: () => void;
+  onSelectProvider: (providerId: AgentProviderId) => void;
   onRunAgent: (prompt: string) => void;
 }
 
@@ -44,6 +50,37 @@ export interface SetupAgentPanelOpts {
 
 const MAX_LOG_CHARS = 4000;
 
+interface ProviderMeta {
+  id: AgentProviderId;
+  label: string;
+  shortLabel: string;
+  keyPlaceholder: string;
+  connectHint: string;
+  subscriptionHint?: string;
+  dashboardLabel: string;
+}
+
+const PROVIDERS: Record<AgentProviderId, ProviderMeta> = {
+  cursor: {
+    id: 'cursor',
+    label: 'Cursor Agent',
+    shortLabel: 'Cursor',
+    keyPlaceholder: 'crsr_… paste API key',
+    connectHint: 'Connect Cursor to ask the agent to edit the selected element.',
+    dashboardLabel: 'Open Cursor Dashboard',
+  },
+  'claude-code': {
+    id: 'claude-code',
+    label: 'Claude Code',
+    shortLabel: 'Claude',
+    keyPlaceholder: 'sk-ant-… paste API key (optional)',
+    connectHint:
+      'Claude Code uses your existing Claude CLI login. Run `claude` then `/login` in a terminal — or paste an ANTHROPIC_API_KEY below.',
+    subscriptionHint: 'Subscription auth: run `claude` then `/login` in any terminal.',
+    dashboardLabel: 'Open Claude Code Docs',
+  },
+};
+
 export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController {
   injectCss();
 
@@ -56,9 +93,14 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   const title = document.createElement('span');
   title.className = 'ap-title';
   title.textContent = 'Ask Agent';
+  const providerToggle = document.createElement('div');
+  providerToggle.className = 'ap-provider-toggle';
+  providerToggle.setAttribute('role', 'tablist');
+  providerToggle.setAttribute('aria-label', 'Agent provider');
   const status = document.createElement('span');
   status.className = 'ap-status';
   header.appendChild(title);
+  header.appendChild(providerToggle);
   header.appendChild(status);
   root.appendChild(header);
 
@@ -67,6 +109,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   root.appendChild(body);
 
   let state: AgentPanelState = {
+    providerId: 'cursor',
     connected: false,
     agentRunning: false,
     runLog: '',
@@ -74,7 +117,12 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   let pendingPrompt = '';
   let pendingKey = '';
 
+  function provider(): ProviderMeta {
+    return PROVIDERS[state.providerId];
+  }
+
   function render(): void {
+    renderProviderToggle();
     body.innerHTML = '';
     if (state.agentRunning || state.runLog || state.runError) {
       renderRun();
@@ -84,14 +132,45 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
       status.textContent = 'not connected';
     } else {
       renderPrompt();
-      status.textContent = state.connectionSource === 'environment' ? 'connected · env' : 'connected';
+      status.textContent = describeConnectionStatus();
+    }
+  }
+
+  function describeConnectionStatus(): string {
+    if (state.providerId === 'claude-code') {
+      if (state.connectionSource === 'environment') return 'connected · env';
+      if (state.connectionSource === 'secret') return 'connected · key';
+      return 'connected · subscription';
+    }
+    return state.connectionSource === 'environment' ? 'connected · env' : 'connected';
+  }
+
+  function renderProviderToggle(): void {
+    providerToggle.innerHTML = '';
+    for (const id of Object.keys(PROVIDERS) as AgentProviderId[]) {
+      const meta = PROVIDERS[id];
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ap-provider-pill' + (state.providerId === id ? ' is-active' : '');
+      btn.textContent = meta.shortLabel;
+      btn.title = meta.label;
+      btn.disabled = state.agentRunning;
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', state.providerId === id ? 'true' : 'false');
+      btn.addEventListener('click', () => {
+        if (state.agentRunning) return;
+        if (state.providerId === id) return;
+        opts.actions.onSelectProvider(id);
+      });
+      providerToggle.appendChild(btn);
     }
   }
 
   function renderConnect(): void {
+    const meta = provider();
     const hint = document.createElement('p');
     hint.className = 'ap-hint';
-    hint.textContent = 'Connect Cursor to ask the agent to edit the selected element.';
+    hint.textContent = meta.connectHint;
     body.appendChild(hint);
 
     const dashRow = document.createElement('div');
@@ -99,8 +178,11 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     const dashBtn = document.createElement('button');
     dashBtn.type = 'button';
     dashBtn.className = 'ap-btn-ghost';
-    dashBtn.textContent = 'Open Cursor Dashboard';
-    dashBtn.addEventListener('click', () => opts.actions.onOpenDashboard());
+    dashBtn.textContent = meta.dashboardLabel;
+    dashBtn.addEventListener('click', () => {
+      if (meta.id === 'cursor') opts.actions.onOpenDashboard();
+      else opts.actions.onOpenClaudeDocs();
+    });
     dashRow.appendChild(dashBtn);
     body.appendChild(dashRow);
 
@@ -108,7 +190,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     inputRow.className = 'ap-row ap-key-row';
     const input = document.createElement('input');
     input.type = 'password';
-    input.placeholder = 'crsr_… paste API key';
+    input.placeholder = meta.keyPlaceholder;
     input.className = 'ap-input';
     input.spellcheck = false;
     input.autocomplete = 'off';
@@ -135,7 +217,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
 
     const sub = document.createElement('p');
     sub.className = 'ap-subhint';
-    sub.textContent = 'Stored in extension secrets, not in the workspace.';
+    sub.textContent = meta.subscriptionHint ?? 'Stored in extension secrets, not in this workspace.';
     body.appendChild(sub);
 
     function submitKey(): void {
@@ -156,19 +238,20 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     if (!state.selectedLabel) {
       const empty = document.createElement('p');
       empty.className = 'ap-hint';
-      empty.textContent = 'Click an element in the preview, then write your prompt below.';
+      empty.textContent = 'No element selected. Your prompt will apply to the current page.';
       body.appendChild(empty);
     }
 
     const textarea = document.createElement('textarea');
     textarea.className = 'ap-textarea';
     textarea.rows = 3;
-    textarea.placeholder = 'e.g. Make this button more prominent and add a chevron icon.';
+    textarea.placeholder = state.selectedLabel
+      ? 'e.g. Make this button more prominent and add a chevron icon.'
+      : 'e.g. Improve the visual hierarchy and make the page feel more polished.';
     textarea.value = pendingPrompt;
-    textarea.disabled = !state.selectedLabel;
     textarea.addEventListener('input', () => {
       pendingPrompt = textarea.value;
-      sendBtn.disabled = textarea.value.trim().length === 0 || !state.selectedLabel;
+      sendBtn.disabled = textarea.value.trim().length === 0;
     });
     textarea.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -186,13 +269,13 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     const forget = document.createElement('button');
     forget.type = 'button';
     forget.className = 'ap-link';
-    forget.textContent = 'Disconnect';
+    forget.textContent = state.providerId === 'claude-code' ? 'Forget API key' : 'Disconnect';
     forget.addEventListener('click', () => opts.actions.onForgetApiKey());
     const sendBtn = document.createElement('button');
     sendBtn.type = 'button';
     sendBtn.className = 'ap-btn-primary';
     sendBtn.textContent = 'Send';
-    sendBtn.disabled = textarea.value.trim().length === 0 || !state.selectedLabel;
+    sendBtn.disabled = textarea.value.trim().length === 0;
     sendBtn.addEventListener('click', submitPrompt);
     footer.appendChild(note);
     footer.appendChild(forget);
@@ -201,7 +284,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
 
     function submitPrompt(): void {
       const value = textarea.value.trim();
-      if (!value || !state.selectedLabel) return;
+      if (!value) return;
       pendingPrompt = '';
       opts.actions.onRunAgent(value);
     }
@@ -211,10 +294,10 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     const heading = document.createElement('div');
     heading.className = 'ap-meta';
     heading.textContent = state.agentRunning
-      ? 'Agent running…'
+      ? `${provider().label} running…`
       : state.runError
-        ? 'Agent failed'
-        : 'Agent finished';
+        ? `${provider().label} failed`
+        : `${provider().label} finished`;
     body.appendChild(heading);
 
     if (state.runError) {
@@ -246,7 +329,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     } else {
       const note = document.createElement('span');
       note.className = 'ap-subhint';
-      note.textContent = 'Streaming output from Cursor Agent…';
+      note.textContent = `Streaming output from ${provider().label}…`;
       footer.appendChild(note);
     }
     body.appendChild(footer);
@@ -325,6 +408,37 @@ const AP_CSS = `
   letter-spacing: 0.02em;
   text-transform: uppercase;
   opacity: 0.85;
+}
+.ap-provider-toggle {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+  padding: 1px;
+  border-radius: 3px;
+  background: var(--vscode-input-background, rgba(0,0,0,0.15));
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+}
+.ap-provider-pill {
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 8px;
+  background: transparent;
+  color: inherit;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.ap-provider-pill:hover { opacity: 1; }
+.ap-provider-pill:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.ap-provider-pill.is-active {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+  opacity: 1;
 }
 .ap-status {
   margin-left: auto;

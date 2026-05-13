@@ -25,7 +25,11 @@
     "onCommand:finesse.openPreview",
     "onCommand:finesse.connectCursorAgent",
     "onCommand:finesse.disconnectCursorAgent",
-    "onCommand:finesse.cursorAgentStatus"
+    "onCommand:finesse.cursorAgentStatus",
+    "onCommand:finesse.connectClaudeAgent",
+    "onCommand:finesse.disconnectClaudeAgent",
+    "onCommand:finesse.claudeAgentStatus",
+    "onCommand:finesse.selectAgentProvider"
   ],
   "contributes": {
     "commands": [
@@ -52,6 +56,22 @@
       {
         "command": "finesse.cursorAgentStatus",
         "title": "Finesse: Show Cursor Agent Connection Status"
+      },
+      {
+        "command": "finesse.connectClaudeAgent",
+        "title": "Finesse: Connect Claude Code"
+      },
+      {
+        "command": "finesse.disconnectClaudeAgent",
+        "title": "Finesse: Disconnect Claude Code"
+      },
+      {
+        "command": "finesse.claudeAgentStatus",
+        "title": "Finesse: Show Claude Code Connection Status"
+      },
+      {
+        "command": "finesse.selectAgentProvider",
+        "title": "Finesse: Select Agent Provider"
       }
     ],
     "configuration": {
@@ -110,6 +130,24 @@
           "type": "string",
           "default": "composer-2",
           "description": "Cursor model id to use when asking an agent to change the selected element."
+        },
+        "finesse.agent.claudeModel": {
+          "type": "string",
+          "default": "claude-opus-4-7",
+          "description": "Claude model id (e.g. claude-opus-4-7, claude-sonnet-4-6, or alias 'opus'/'sonnet'/'haiku') used by the Claude Code agent provider."
+        },
+        "finesse.agent.provider": {
+          "type": "string",
+          "enum": [
+            "cursor",
+            "claude-code"
+          ],
+          "enumDescriptions": [
+            "Use the Cursor Agent SDK (requires a Cursor API key).",
+            "Use Claude Code via the Claude Agent SDK (uses your local Claude Code subscription if authenticated)."
+          ],
+          "default": "cursor",
+          "description": "Which agent runs when you press Send in the Ask Agent panel."
         }
       }
     }
@@ -126,6 +164,7 @@
     "clean": "rimraf dist *.vsix"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.139",
     "@cursor/sdk": "^1.0.12",
     "parse5": "^7.1.2",
     "ws": "^8.18.0"

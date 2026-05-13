@@ -1,10 +1,33 @@
-import type { AgentElementRequest, AgentProvider, AgentRunSink } from '../types';
+import type { AgentElementRequest, AgentPageRequest, AgentProvider, AgentRunSink } from '../types';
 
 export class CursorAgentProvider implements AgentProvider {
   readonly id = 'cursor';
   readonly label = 'Cursor Agent SDK';
 
   async runElementRequest(request: AgentElementRequest, sink: AgentRunSink): Promise<void> {
+    await this.runRequest(
+      request,
+      sink,
+      `Finesse: ${request.element.tagName} in ${request.element.workspaceRelativePath}`,
+      buildCursorElementPrompt(request),
+    );
+  }
+
+  async runPageRequest(request: AgentPageRequest, sink: AgentRunSink): Promise<void> {
+    await this.runRequest(
+      request,
+      sink,
+      `Finesse: improve ${request.page.workspaceRelativePath}`,
+      buildCursorPagePrompt(request),
+    );
+  }
+
+  private async runRequest(
+    request: AgentElementRequest | AgentPageRequest,
+    sink: AgentRunSink,
+    name: string,
+    prompt: string,
+  ): Promise<void> {
     const apiKey = request.apiKey;
     if (!apiKey) {
       throw new Error(
@@ -16,13 +39,13 @@ export class CursorAgentProvider implements AgentProvider {
     const { Agent } = await import('@cursor/sdk');
     const agent = await Agent.create({
       apiKey,
-      name: `Finesse: ${request.element.tagName} in ${request.element.workspaceRelativePath}`,
+      name,
       model: { id: request.model },
       local: { cwd: request.workspaceRoot },
     });
 
     try {
-      const run = await agent.send(buildCursorElementPrompt(request));
+      const run = await agent.send(prompt);
       sink.status(`Run ${run.id} started`);
       for await (const event of run.stream()) {
         const text = assistantTextFromEvent(event);
@@ -84,6 +107,32 @@ ${element.afterContext}
 Rendered outerHTML preview:
 \`\`\`html
 ${element.outerHtmlPreview}
+\`\`\`
+`;
+}
+
+export function buildCursorPagePrompt(request: AgentPageRequest): string {
+  const { page, userPrompt } = request;
+  return `You are improving the current page opened in Finesse.
+
+User request:
+${userPrompt}
+
+Current page:
+- File: ${page.workspaceRelativePath}
+- Current document version: ${page.documentVersion}
+- Language: ${page.languageId}
+
+Instructions:
+- Make the requested improvement in the repository.
+- Treat the current page as the primary target.
+- Keep the change scoped to this page unless the user request clearly needs shared styles, assets, or adjacent files.
+- Preserve existing formatting and project conventions.
+- If the request is ambiguous, make a reasonable page-level improvement and explain what changed.
+
+Current source:
+\`\`\`${page.languageId}
+${page.source}
 \`\`\`
 `;
 }

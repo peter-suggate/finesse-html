@@ -17,7 +17,7 @@ const configs = [
     outfile: 'dist/host/extension.js',
     platform: 'node',
     format: 'cjs',
-    external: ['vscode', '@cursor/sdk'],
+    external: ['vscode', '@cursor/sdk', '@anthropic-ai/claude-agent-sdk'],
   },
   {
     ...common,

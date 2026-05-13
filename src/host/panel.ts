@@ -2,6 +2,8 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type {
   AgentConnectionState,
+  AgentProviderId,
+  AgentProviderState,
   AgentRunStatus,
   AgentSelectionState,
   DocumentState,
@@ -24,6 +26,7 @@ import type {
 } from '../shared/protocol';
 import { runSelectedElementAgent } from './agent';
 import { AgentCredentialStore } from './agent/credentials';
+import { isAgentProviderId } from './agent/types';
 import {
   applyAttrEditCommit,
   applyBlockHtmlCommit,
@@ -109,6 +112,11 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   let currentAgentSelection: ElementSelectionSnapshot | null = null;
   let agentRunning = false;
   const credentials = new AgentCredentialStore(deps.context);
+  const PROVIDER_STATE_KEY = 'finesse.agent.selectedProvider';
+  const persistedProvider = deps.context.globalState.get<string>(PROVIDER_STATE_KEY);
+  let selectedProvider: AgentProviderId = isAgentProviderId(persistedProvider)
+    ? persistedProvider
+    : deps.getConfig().agentDefaultProvider;
   const jsMode = isJsLikeDocument(document);
   const escapeReplacement: ReplacementEscaper | undefined = jsMode
     ? escapeForJsTemplate
@@ -178,21 +186,45 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     panel.webview.postMessage(msg);
   }
 
-  async function postAgentConnectionState(): Promise<void> {
-    const key = await credentials.getApiKey('cursor');
+  async function postAgentConnectionState(
+    providerId: AgentProviderId = selectedProvider,
+  ): Promise<void> {
+    const key = await credentials.getApiKey(providerId);
+    let connected: boolean;
+    if (providerId === 'cursor') {
+      connected = !!key;
+    } else {
+      // Claude Code is "connected" either if we have an API key OR if we
+      // expect the bundled CLI to fall back to subscription auth. We can't
+      // probe the subscription synchronously, so optimistically report
+      // connected; the run will report a clearer error if it fails.
+      connected = true;
+    }
     const msg: AgentConnectionState = {
       type: 'agentConnectionState',
-      providerId: 'cursor',
-      connected: !!key,
+      providerId,
+      connected,
       source: key?.source === 'prompt' ? 'secret' : key?.source,
     };
     panel.webview.postMessage(msg);
   }
 
-  function postAgentRunStatus(phase: AgentRunStatus['phase'], text?: string): void {
+  function postAgentProviderState(): void {
+    const msg: AgentProviderState = {
+      type: 'agentProviderState',
+      providerId: selectedProvider,
+    };
+    panel.webview.postMessage(msg);
+  }
+
+  function postAgentRunStatus(
+    phase: AgentRunStatus['phase'],
+    text?: string,
+    providerId: AgentProviderId = selectedProvider,
+  ): void {
     const msg: AgentRunStatus = {
       type: 'agentRunStatus',
-      providerId: 'cursor',
+      providerId,
       phase,
       text,
     };
@@ -268,14 +300,30 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           await vscode.env.openExternal(
             vscode.Uri.parse(AgentCredentialStore.cursorDashboardUrl),
           );
+        } else if (msg.action === 'openClaudeDocs') {
+          await vscode.env.openExternal(
+            vscode.Uri.parse(AgentCredentialStore.claudeDocsUrl),
+          );
         } else if (msg.action === 'saveApiKey') {
-          await credentials.setApiKey('cursor', msg.value);
+          await credentials.setApiKey(selectedProvider, msg.value);
           await postAgentConnectionState();
         } else if (msg.action === 'forgetApiKey') {
-          await credentials.clearApiKey('cursor');
+          await credentials.clearApiKey(selectedProvider);
           await postAgentConnectionState();
+        } else if (msg.action === 'selectAgentProvider') {
+          if (isAgentProviderId(msg.providerId) && msg.providerId !== selectedProvider) {
+            selectedProvider = msg.providerId;
+            postAgentProviderState();
+            void deps.context.globalState.update(PROVIDER_STATE_KEY, selectedProvider).then(
+              undefined,
+              (err: unknown) => {
+                console.warn('[finesse] failed to persist agent provider:', err);
+              },
+            );
+            await postAgentConnectionState(selectedProvider);
+          }
         } else if (msg.action === 'runAgent') {
-          await handleRunAgentRequest(msg.value);
+          await handleRunAgentRequest(msg.value, msg.providerId);
         }
         return;
       case 'ready':
@@ -332,6 +380,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     } satisfies FileMeta);
     postDocumentState();
     postAgentSelectionState();
+    postAgentProviderState();
     void postAgentConnectionState();
   }
 
@@ -641,51 +690,73 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     postAgentSelectionState();
   }
 
-  async function handleRunAgentRequest(userPrompt: string): Promise<void> {
+  async function handleRunAgentRequest(
+    userPrompt: string,
+    providerId: AgentProviderId,
+  ): Promise<void> {
     if (agentRunning) return;
+    const runProvider = isAgentProviderId(providerId) ? providerId : selectedProvider;
+    if (runProvider !== selectedProvider) {
+      selectedProvider = runProvider;
+      postAgentProviderState();
+      void deps.context.globalState.update(PROVIDER_STATE_KEY, selectedProvider).then(
+        undefined,
+        (err: unknown) => {
+          console.warn('[finesse] failed to persist agent provider:', err);
+        },
+      );
+    }
     const trimmed = (userPrompt ?? '').trim();
     if (!trimmed) {
-      postAgentRunStatus('error', 'Prompt was empty.');
-      return;
-    }
-    if (!currentAgentSelection || !currentOffsetMap) {
-      postAgentRunStatus('error', 'Select an element in the preview first.');
+      postAgentRunStatus('error', 'Prompt was empty.', runProvider);
       return;
     }
     if (
-      currentAgentSelection.documentVersion !== currentVersion ||
-      currentAgentSelection.documentVersion !== document.version
+      currentAgentSelection &&
+      (currentAgentSelection.documentVersion !== currentVersion ||
+        currentAgentSelection.documentVersion !== document.version)
     ) {
       currentAgentSelection = null;
       postAgentSelectionState();
-      postAgentRunStatus('error', 'That selection is stale. Select the element again.');
+      postAgentRunStatus('error', 'That selection is stale. Select the element again.', runProvider);
       return;
     }
 
     agentRunning = true;
     postAgentSelectionState();
-    postAgentRunStatus('starting', `Running Cursor Agent on ${selectionLabel(currentAgentSelection)}`);
+    const cfg = deps.getConfig();
+    const providerLabel = runProvider === 'cursor' ? 'Cursor Agent' : 'Claude Code';
+    const model =
+      runProvider === 'cursor' ? cfg.agentCursorModel : cfg.agentClaudeModel;
+    const targetLabel = currentAgentSelection
+      ? selectionLabel(currentAgentSelection)
+      : relativePath;
+    postAgentRunStatus(
+      'starting',
+      `Running ${providerLabel} on ${targetLabel}`,
+      runProvider,
+    );
     try {
       await runSelectedElementAgent({
-        providerId: 'cursor',
+        providerId: runProvider,
         context: deps.context,
         workspaceRoot: deps.workspaceRoot,
-        model: deps.getConfig().agentCursorModel,
+        model,
         document,
         relativePath,
-        offsetMap: currentOffsetMap,
-        selection: currentAgentSelection,
+        offsetMap: currentOffsetMap ?? undefined,
+        selection: currentAgentSelection ?? undefined,
         userPrompt: trimmed,
-        onStatus: (text) => postAgentRunStatus('status', text),
-        onOutput: (text) => postAgentRunStatus('output', text),
+        onStatus: (text) => postAgentRunStatus('status', text, runProvider),
+        onOutput: (text) => postAgentRunStatus('output', text, runProvider),
       });
-      postAgentRunStatus('done');
+      postAgentRunStatus('done', undefined, runProvider);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      postAgentRunStatus('error', humanizeAgentError(message));
+      postAgentRunStatus('error', humanizeAgentError(message, runProvider), runProvider);
       // Re-check connection — if the key is missing/invalid, the popover flips
       // back to the Connect state automatically.
-      await postAgentConnectionState();
+      await postAgentConnectionState(runProvider);
     } finally {
       agentRunning = false;
       postAgentSelectionState();
@@ -821,13 +892,25 @@ async function waitForDocumentClean(
   });
 }
 
-function humanizeAgentError(message: string): string {
+function humanizeAgentError(message: string, providerId: AgentProviderId): string {
+  const lower = message.toLowerCase();
+  if (providerId === 'cursor') {
+    if (
+      message.includes('CURSOR_API_KEY') ||
+      lower.includes('api key') ||
+      lower.includes('not configured')
+    ) {
+      return 'Cursor Agent is not connected. Choose "Connect Cursor Agent", open the Cursor Dashboard, create a key in Integrations > User API Keys, then paste it into Finesse.';
+    }
+    return message;
+  }
   if (
-    message.includes('CURSOR_API_KEY') ||
-    message.toLowerCase().includes('api key') ||
-    message.toLowerCase().includes('not configured')
+    lower.includes('not authenticated') ||
+    lower.includes('authentication_failed') ||
+    lower.includes('login') ||
+    lower.includes('api key')
   ) {
-    return 'Cursor Agent is not connected. Choose "Connect Cursor Agent", open the Cursor Dashboard, create a key in Integrations > User API Keys, then paste it into Finesse.';
+    return 'Claude Code is not authenticated. In a terminal run `claude` then `/login` to use your subscription — or paste an ANTHROPIC_API_KEY into the Ask Agent panel.';
   }
   return message;
 }

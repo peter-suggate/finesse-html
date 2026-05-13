@@ -1,7 +1,8 @@
 import type * as vscode from 'vscode';
 import { describe, expect, it } from 'vitest';
 import { buildElementSourceReference } from '../src/host/agent/selection';
-import { buildCursorElementPrompt } from '../src/host/agent/providers/cursor';
+import { buildCursorElementPrompt, buildCursorPagePrompt } from '../src/host/agent/providers/cursor';
+import { buildClaudeElementPrompt, buildClaudePagePrompt } from '../src/host/agent/providers/claude';
 import { walkEditable } from '../src/host/parse/walkEditable';
 import type { ElementSelectionSnapshot, ElementStyleSnapshot } from '../src/shared/protocol';
 
@@ -94,6 +95,18 @@ describe('agent selected-element context flow', () => {
     expect(prompt).toContain(`- Source SHA-256: ${element.sourceHash}`);
     expect(prompt).toContain('<button class="primary" aria-label="Start trial">Start trial</button>');
     expect(prompt).toContain('Treat the source range and hash as the primary identity');
+
+    const claudePrompt = buildClaudeElementPrompt({
+      providerId: 'claude-code',
+      workspaceRoot: '/workspace',
+      model: 'claude-opus-4-7',
+      userPrompt: 'Make this CTA blue and more prominent.',
+      element,
+    });
+    expect(claudePrompt).toContain('Make this CTA blue and more prominent.');
+    expect(claudePrompt).toContain('- File: src/page.html');
+    expect(claudePrompt).toContain(`- Source SHA-256: ${element.sourceHash}`);
+    expect(claudePrompt).toContain('Edit tool');
   });
 
   it('rejects stale selections before any agent provider can run', () => {
@@ -124,5 +137,39 @@ describe('agent selected-element context flow', () => {
         },
       }),
     ).toThrow(/stale/i);
+  });
+
+  it('builds page-level prompts when no element is selected', () => {
+    const source = '<html><body><h1>Welcome</h1><p>Plain page</p></body></html>';
+    const page = {
+      workspaceRelativePath: 'src/page.html',
+      documentVersion: 5,
+      languageId: 'html',
+      source,
+    };
+
+    const cursorPrompt = buildCursorPagePrompt({
+      providerId: 'cursor',
+      workspaceRoot: '/workspace',
+      model: 'composer-2',
+      userPrompt: 'Improve this page visually.',
+      page,
+    });
+    expect(cursorPrompt).toContain('Improve this page visually.');
+    expect(cursorPrompt).toContain('- File: src/page.html');
+    expect(cursorPrompt).toContain('Treat the current page as the primary target');
+    expect(cursorPrompt).toContain(source);
+
+    const claudePrompt = buildClaudePagePrompt({
+      providerId: 'claude-code',
+      workspaceRoot: '/workspace',
+      model: 'claude-opus-4-7',
+      userPrompt: 'Improve this page visually.',
+      page,
+    });
+    expect(claudePrompt).toContain('Improve this page visually.');
+    expect(claudePrompt).toContain('- File: src/page.html');
+    expect(claudePrompt).toContain('Edit tool');
+    expect(claudePrompt).toContain(source);
   });
 });

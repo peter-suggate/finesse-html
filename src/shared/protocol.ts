@@ -75,6 +75,8 @@ export type DocumentState = {
   canRedo: boolean;
 };
 
+export type AgentProviderId = 'cursor' | 'claude-code';
+
 export type AgentSelectionState = {
   type: 'agentSelectionState';
   selected: boolean;
@@ -82,9 +84,15 @@ export type AgentSelectionState = {
   agentRunning: boolean;
 };
 
+export type AgentProviderState = {
+  type: 'agentProviderState';
+  /** Which provider is currently active for the Ask Agent panel. */
+  providerId: AgentProviderId;
+};
+
 export type AgentConnectionState = {
   type: 'agentConnectionState';
-  providerId: 'cursor';
+  providerId: AgentProviderId;
   connected: boolean;
   /** Where the key came from when connected. */
   source?: 'secret' | 'environment';
@@ -92,7 +100,7 @@ export type AgentConnectionState = {
 
 export type AgentRunStatus = {
   type: 'agentRunStatus';
-  providerId: 'cursor';
+  providerId: AgentProviderId;
   /**
    * `starting`: agent run is initialising
    * `output`: incremental assistant output (append `text` to the running log)
@@ -113,6 +121,7 @@ export type HostMessage =
   | FileMeta
   | DocumentState
   | AgentSelectionState
+  | AgentProviderState
   | AgentConnectionState
   | AgentRunStatus;
 
@@ -394,6 +403,8 @@ export type WebviewActionMessage =
   | { type: '__webview_action'; action: 'redo' }
   | { type: '__webview_action'; action: 'commandPalette' }
   | { type: '__webview_action'; action: 'openCursorDashboard' }
+  | { type: '__webview_action'; action: 'openClaudeDocs' }
   | { type: '__webview_action'; action: 'saveApiKey'; value: string }
   | { type: '__webview_action'; action: 'forgetApiKey' }
-  | { type: '__webview_action'; action: 'runAgent'; value: string };
+  | { type: '__webview_action'; action: 'selectAgentProvider'; providerId: AgentProviderId }
+  | { type: '__webview_action'; action: 'runAgent'; value: string; providerId: AgentProviderId };

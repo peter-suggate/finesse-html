@@ -7,6 +7,7 @@ import type {
   PanelSelectElement,
   PanelStyleEdit,
   WebviewActionMessage,
+  AgentProviderId,
 } from '../shared/protocol';
 import { setupSidePanel, type SidePanelController } from './stylePanel';
 import { setupAgentPanel, type AgentPanelController } from './agentPanel';
@@ -166,6 +167,7 @@ function bootIframe(init: InitData): void {
   const dock = document.getElementById('side-dock');
   let sidePanel: SidePanelController | null = null;
   let agentPanel: AgentPanelController | null = null;
+  let currentAgentProvider: AgentProviderId = 'cursor';
   if (dock) {
     sidePanel = setupSidePanel({
       host: dock,
@@ -180,11 +182,28 @@ function bootIframe(init: InitData): void {
       host: dock,
       actions: {
         onOpenDashboard: () => post({ type: '__webview_action', action: 'openCursorDashboard' }),
+        onOpenClaudeDocs: () => post({ type: '__webview_action', action: 'openClaudeDocs' }),
         onSaveApiKey: (value) => post({ type: '__webview_action', action: 'saveApiKey', value }),
         onForgetApiKey: () => post({ type: '__webview_action', action: 'forgetApiKey' }),
+        onSelectProvider: (providerId) => {
+          currentAgentProvider = providerId;
+          agentPanel?.setState({
+            providerId,
+            connected: providerId === 'claude-code',
+            connectionSource: undefined,
+            runLog: '',
+            runError: undefined,
+          });
+          post({ type: '__webview_action', action: 'selectAgentProvider', providerId });
+        },
         onRunAgent: (value) => {
           agentPanel?.clearLog();
-          post({ type: '__webview_action', action: 'runAgent', value });
+          post({
+            type: '__webview_action',
+            action: 'runAgent',
+            value,
+            providerId: currentAgentProvider,
+          });
         },
       },
     });
@@ -279,12 +298,20 @@ function bootIframe(init: InitData): void {
         });
         break;
       case 'agentConnectionState':
+        if (data.providerId !== currentAgentProvider) break;
         agentPanel?.setState({
           connected: data.connected,
           connectionSource: data.source,
         });
         break;
+      case 'agentProviderState':
+        currentAgentProvider = data.providerId;
+        agentPanel?.setState({
+          providerId: data.providerId,
+        });
+        break;
       case 'agentRunStatus':
+        if (data.providerId !== currentAgentProvider) break;
         switch (data.phase) {
           case 'starting':
             agentPanel?.clearLog();
@@ -375,6 +402,7 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'fileMeta' ||
     t === 'documentState' ||
     t === 'agentSelectionState' ||
+    t === 'agentProviderState' ||
     t === 'agentConnectionState' ||
     t === 'agentRunStatus'
   );

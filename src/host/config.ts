@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { AgentProviderId } from '../shared/protocol';
 
 export interface ResolvedConfig {
   port: number | 'auto';
@@ -9,6 +10,8 @@ export interface ResolvedConfig {
   openOnHtmlOpen: boolean;
   aiCommand: string;
   agentCursorModel: string;
+  agentClaudeModel: string;
+  agentDefaultProvider: AgentProviderId;
 }
 
 const DEFAULT_TEMPLATE_PATTERNS: readonly RegExp[] = [
@@ -28,6 +31,9 @@ export function readConfig(): ResolvedConfig {
     .filter((r): r is RegExp => r !== null);
   const templatePatterns =
     compiled.length > 0 ? compiled : Array.from(DEFAULT_TEMPLATE_PATTERNS);
+  const rawProvider = cfg.get<string>('agent.provider', 'cursor');
+  const agentDefaultProvider: AgentProviderId =
+    rawProvider === 'claude-code' ? 'claude-code' : 'cursor';
   return {
     port,
     editableElements: cfg.get<string[]>('editableElements', []),
@@ -37,6 +43,8 @@ export function readConfig(): ResolvedConfig {
     openOnHtmlOpen: cfg.get<boolean>('openOnHtmlOpen', false),
     aiCommand: cfg.get<string>('aiCommand', ''),
     agentCursorModel: cfg.get<string>('agent.cursorModel', 'composer-2'),
+    agentClaudeModel: cfg.get<string>('agent.claudeModel', 'claude-opus-4-7'),
+    agentDefaultProvider,
   };
 }
 

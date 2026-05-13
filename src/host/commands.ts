@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentCredentialStore } from './agent/credentials';
+import { ALL_AGENT_PROVIDER_IDS, isAgentProviderId } from './agent/types';
 import type { ResolvedConfig } from './config';
 import { createPreviewPanel, type PreviewPanel } from './panel';
 import type { PreviewServer } from './server';
@@ -32,6 +33,18 @@ export function registerCommands(
     ),
     vscode.commands.registerCommand('finesse.cursorAgentStatus', () =>
       cursorAgentStatus(context),
+    ),
+    vscode.commands.registerCommand('finesse.connectClaudeAgent', () =>
+      connectClaudeAgent(context),
+    ),
+    vscode.commands.registerCommand('finesse.disconnectClaudeAgent', () =>
+      disconnectClaudeAgent(context),
+    ),
+    vscode.commands.registerCommand('finesse.claudeAgentStatus', () =>
+      claudeAgentStatus(context),
+    ),
+    vscode.commands.registerCommand('finesse.selectAgentProvider', () =>
+      selectAgentProvider(),
     ),
   );
 }
@@ -174,4 +187,40 @@ async function disconnectCursorAgent(context: vscode.ExtensionContext): Promise<
 async function cursorAgentStatus(context: vscode.ExtensionContext): Promise<void> {
   const credentials = new AgentCredentialStore(context);
   await credentials.showStatus('cursor');
+}
+
+async function connectClaudeAgent(context: vscode.ExtensionContext): Promise<void> {
+  const credentials = new AgentCredentialStore(context);
+  await credentials.ensureApiKey('claude-code');
+}
+
+async function disconnectClaudeAgent(context: vscode.ExtensionContext): Promise<void> {
+  const credentials = new AgentCredentialStore(context);
+  await credentials.clearApiKey('claude-code');
+  void vscode.window.showInformationMessage(
+    'Cleared stored Claude API key. Subscription login via the Claude CLI (if any) is still active.',
+  );
+}
+
+async function claudeAgentStatus(context: vscode.ExtensionContext): Promise<void> {
+  const credentials = new AgentCredentialStore(context);
+  await credentials.showStatus('claude-code');
+}
+
+async function selectAgentProvider(): Promise<void> {
+  const items = ALL_AGENT_PROVIDER_IDS.map((id) => ({
+    label: id === 'cursor' ? 'Cursor Agent' : 'Claude Code',
+    description: id,
+    id,
+  }));
+  const pick = await vscode.window.showQuickPick(items, {
+    title: 'Finesse: Select Agent Provider',
+    placeHolder: 'Which agent should run when you press Send in the Ask Agent panel?',
+  });
+  if (!pick) return;
+  if (!isAgentProviderId(pick.id)) return;
+  await vscode.workspace
+    .getConfiguration('finesse')
+    .update('agent.provider', pick.id, vscode.ConfigurationTarget.Global);
+  void vscode.window.showInformationMessage(`Finesse will now use ${pick.label}.`);
 }
