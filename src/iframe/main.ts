@@ -55,7 +55,11 @@ function start(): void {
   setupReloadSocket(init.fileMeta.path);
   setupHostMessageListener(session);
   setupGlobalErrorHandlers();
-  postToParent({ type: 'ready' });
+  postToParent({
+    type: 'ready',
+    path: init.fileMeta.path,
+    documentVersion: init.offsetMap?.documentVersion,
+  });
 }
 
 function setupReloadSocket(path: string): void {

@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type {
@@ -33,16 +34,14 @@ import {
   applyBlockTagCommit,
   applyCssDeclarationCommit,
   applyEditCommit,
-  applyRecordedSplices,
   applyRemoveCommit,
   type ReplacementEscaper,
 } from './applyEdit';
 import type { ResolvedConfig } from './config';
-import { createEditTransaction, EditHistory, hashText } from './editHistory';
+import { hashText } from './editHistory';
 import { escapeForJsTemplate } from './jsTemplateEscape';
 import { detectTemplate, hasEditAnywayOverride, walkEditable, walkEditableInJs } from './parse';
 import { injectElementIds } from './server/inject';
-import type { UndoEntry } from './undoStack';
 
 const JS_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'javascript',
@@ -72,11 +71,107 @@ export interface PreviewPanel {
   currentInjectedPreviewHtml: string | null;
   isTemplated: boolean;
   expectedSelfEditVersion: number | null;
+  handlesDocument(uri: vscode.Uri): boolean;
+  onTextDocumentChanged(event: vscode.TextDocumentChangeEvent): void;
+  getInjectedPreviewHtmlForPath(relPath: string): string | null;
+  getOffsetMapForPath(relPath: string): OffsetMap | null;
+  isTemplatedPath(relPath: string): boolean;
   postToWebview(msg: HostMessage): void;
   dispose(): void;
   reveal(): void;
   onDocumentChanged(doc: vscode.TextDocument, kind: 'self' | 'external'): void;
   onDocumentSaved(doc: vscode.TextDocument): void;
+}
+
+interface PageState {
+  uri: vscode.Uri;
+  relativePath: string;
+  jsMode: boolean;
+  escapeReplacement?: ReplacementEscaper;
+  currentVersion: number;
+  currentOffsetMap: OffsetMap | null;
+  currentPreviewHtml: string | null;
+  currentInjectedPreviewHtml: string | null;
+  isTemplated: boolean;
+  expectedSelfEditVersion: number | null;
+}
+
+interface SnapshotFile {
+  version: number;
+  hash: string;
+  text: string;
+}
+
+interface SiteSnapshot {
+  activePath: string;
+  files: Record<string, SnapshotFile>;
+}
+
+interface SiteTransaction {
+  id: string;
+  label: string;
+  before: SiteSnapshot;
+  after: SiteSnapshot;
+}
+
+class SiteSnapshotHistory {
+  private undoStack: SiteTransaction[] = [];
+  private redoStack: SiteTransaction[] = [];
+  private conflicted = false;
+
+  record(transaction: SiteTransaction): void {
+    if (this.conflicted || !snapshotChanged(transaction.before, transaction.after)) return;
+    this.undoStack.push(transaction);
+    this.redoStack = [];
+  }
+
+  peekUndo(): SiteTransaction | null {
+    if (this.conflicted) return null;
+    return this.undoStack.at(-1) ?? null;
+  }
+
+  peekRedo(): SiteTransaction | null {
+    if (this.conflicted) return null;
+    return this.redoStack.at(-1) ?? null;
+  }
+
+  commitUndo(transaction: SiteTransaction): void {
+    if (this.undoStack.at(-1) !== transaction) return;
+    this.undoStack.pop();
+    this.redoStack.push(transaction);
+  }
+
+  commitRedo(transaction: SiteTransaction): void {
+    if (this.redoStack.at(-1) !== transaction) return;
+    this.redoStack.pop();
+    this.undoStack.push(transaction);
+  }
+
+  markExternalConflict(): void {
+    this.conflicted = true;
+  }
+
+  clear(): void {
+    this.undoStack = [];
+    this.redoStack = [];
+    this.conflicted = false;
+  }
+
+  canUndo(): boolean {
+    return !this.conflicted && this.undoStack.length > 0;
+  }
+
+  canRedo(): boolean {
+    return !this.conflicted && this.redoStack.length > 0;
+  }
+}
+
+function snapshotChanged(before: SiteSnapshot, after: SiteSnapshot): boolean {
+  const paths = new Set([...Object.keys(before.files), ...Object.keys(after.files)]);
+  for (const path of paths) {
+    if (before.files[path]?.hash !== after.files[path]?.hash) return true;
+  }
+  return false;
 }
 
 export interface PanelDeps {
@@ -103,12 +198,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     },
   );
 
-  let currentVersion = document.version;
-  let currentOffsetMap: OffsetMap | null = null;
-  let currentPreviewHtml: string | null = null;
-  let currentInjectedPreviewHtml: string | null = null;
-  let isTemplated = false;
-  let expectedSelfEditVersion: number | null = null;
+  const pages = new Map<string, PageState>();
+  let activeRelativePath = relativePath;
   let currentAgentSelection: ElementSelectionSnapshot | null = null;
   let agentRunning = false;
   const credentials = new AgentCredentialStore(deps.context);
@@ -117,44 +208,113 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   let selectedProvider: AgentProviderId = isAgentProviderId(persistedProvider)
     ? persistedProvider
     : deps.getConfig().agentDefaultProvider;
-  const jsMode = isJsLikeDocument(document);
-  const escapeReplacement: ReplacementEscaper | undefined = jsMode
-    ? escapeForJsTemplate
-    : undefined;
-  const editHistory = new EditHistory();
+  const siteHistory = new SiteSnapshotHistory();
   let nextEditTransactionId = 1;
 
-  function reparse(text: string, version: number): void {
+  function activePage(): PageState {
+    return pages.get(activeRelativePath) ?? pages.get(relativePath)!;
+  }
+
+  function createPageState(uri: vscode.Uri, doc?: vscode.TextDocument): PageState {
+    const relPath = relativeWebPath(deps.workspaceRoot, uri.fsPath);
+    const jsMode = doc ? isJsLikeDocument(doc) : false;
+    const page: PageState = {
+      uri,
+      relativePath: relPath,
+      jsMode,
+      escapeReplacement: jsMode ? escapeForJsTemplate : undefined,
+      currentVersion: doc?.version ?? 1,
+      currentOffsetMap: null,
+      currentPreviewHtml: null,
+      currentInjectedPreviewHtml: null,
+      isTemplated: false,
+      expectedSelfEditVersion: null,
+    };
+    pages.set(relPath, page);
+    const text = doc?.getText() ?? readPageFromDisk(page);
+    if (text !== null) reparsePage(page, text, page.currentVersion);
+    return page;
+  }
+
+  function reparsePage(page: PageState, text: string, version: number): void {
     const structuralPatterns = deps.getConfig().templatePatterns;
-    if (jsMode) {
+    if (page.jsMode) {
       const result = walkEditableInJs(text, version, {
         templatePatterns: structuralPatterns,
       });
-      currentOffsetMap = result.offsetMap;
-      currentPreviewHtml = result.composedHtml;
-      currentInjectedPreviewHtml = injectElementIds(result.composedHtml, result.composedOffsetMap);
-      isTemplated = false;
-      currentVersion = version;
+      result.offsetMap.path = page.relativePath;
+      page.currentOffsetMap = result.offsetMap;
+      page.currentPreviewHtml = result.composedHtml;
+      page.currentInjectedPreviewHtml = injectElementIds(result.composedHtml, result.composedOffsetMap);
+      page.isTemplated = false;
+      page.currentVersion = version;
       return;
     }
     const templated = detectTemplate(text, structuralPatterns);
     const overrideTemplate = templated && hasEditAnywayOverride(text);
-    isTemplated = templated && !overrideTemplate;
-    currentOffsetMap = isTemplated
+    page.isTemplated = templated && !overrideTemplate;
+    page.currentOffsetMap = page.isTemplated
       ? null
       : walkEditable(text, version, { templatePatterns: structuralPatterns });
-    currentPreviewHtml = text;
-    currentInjectedPreviewHtml = null;
-    currentVersion = version;
+    if (page.currentOffsetMap) page.currentOffsetMap.path = page.relativePath;
+    page.currentPreviewHtml = text;
+    page.currentInjectedPreviewHtml = null;
+    page.currentVersion = version;
   }
 
-  reparse(document.getText(), document.version);
+  function readPageFromDisk(page: PageState): string | null {
+    try {
+      return fs.readFileSync(page.uri.fsPath, 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  function findOpenDocument(page: PageState): vscode.TextDocument | undefined {
+    return vscode.workspace.textDocuments.find((d) => d.uri.toString() === page.uri.toString());
+  }
+
+  function ensurePageForRel(relPath: string): PageState | null {
+    const normalized = normalizeRelPath(relPath);
+    const existing = pages.get(normalized);
+    if (existing) return existing;
+    const uri = vscode.Uri.file(path.resolve(deps.workspaceRoot, normalized));
+    const within = path.relative(deps.workspaceRoot, uri.fsPath);
+    if (within.startsWith('..') || path.isAbsolute(within)) return null;
+    const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === uri.fsPath);
+    const ext = path.extname(uri.fsPath).toLowerCase();
+    if (!doc && ext !== '.html' && ext !== '.htm') return null;
+    return createPageState(uri, doc);
+  }
+
+  function pageForMessage(msg: { path?: string }): PageState {
+    return (msg.path ? ensurePageForRel(msg.path) : null) ?? activePage();
+  }
+
+  async function openDocumentForPage(page: PageState): Promise<vscode.TextDocument> {
+    const open = findOpenDocument(page);
+    if (open) return open;
+    const doc = await vscode.workspace.openTextDocument(page.uri);
+    if (!page.jsMode) {
+      reparsePage(page, doc.getText(), doc.version);
+    }
+    return doc;
+  }
+
+  function trackedPageForUri(uri: vscode.Uri): PageState | null {
+    for (const page of pages.values()) {
+      if (page.uri.toString() === uri.toString()) return page;
+    }
+    return null;
+  }
+
+  createPageState(document.uri, document);
 
   const iframeUrl = `http://127.0.0.1:${deps.port}/${encodePath(relativePath)}`;
   const fileMeta: FileMeta = {
     type: 'fileMeta',
     path: relativePath,
-    isTemplated,
+    isTemplated: activePage().isTemplated,
   };
   panel.webview.html = buildWebviewHtml(panel.webview, deps.context.extensionPath, {
     iframeUrl,
@@ -167,11 +327,14 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   });
 
   function postDocumentState(): void {
+    const page = activePage();
+    const doc = findOpenDocument(page);
     const msg: DocumentState = {
       type: 'documentState',
-      isDirty: document.isDirty,
-      canUndo: editHistory.canUndo(),
-      canRedo: editHistory.canRedo(),
+      path: page.relativePath,
+      isDirty: doc?.isDirty ?? false,
+      canUndo: siteHistory.canUndo(),
+      canRedo: siteHistory.canRedo(),
     };
     panel.webview.postMessage(msg);
   }
@@ -232,9 +395,10 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function saveDocument(): Promise<void> {
-    if (!document.isDirty) return;
+    const doc = await openDocumentForPage(activePage());
+    if (!doc.isDirty) return;
     try {
-      await document.save();
+      await doc.save();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse save failed: ${message}`);
@@ -244,29 +408,31 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function discardChanges(): Promise<void> {
-    if (!document.isDirty) return;
+    const page = activePage();
+    const doc = await openDocumentForPage(page);
+    if (!doc.isDirty) return;
     const choice = await vscode.window.showWarningMessage(
-      `Discard changes to ${path.basename(document.uri.fsPath)}?`,
+      `Discard changes to ${path.basename(doc.uri.fsPath)}?`,
       { modal: true },
       'Discard',
     );
     if (choice !== 'Discard') return;
     try {
-      await revertActiveDocument(document);
-      await waitForDocumentClean(document);
-      if (document.isDirty) {
+      await revertActiveDocument(doc);
+      await waitForDocumentClean(doc);
+      if (doc.isDirty) {
         throw new Error('VS Code did not revert the file');
       }
-      editHistory.clear();
+      siteHistory.clear();
       currentAgentSelection = null;
-      reparse(document.getText(), document.version);
-      const fm: FileMeta = { type: 'fileMeta', path: relativePath, isTemplated };
-      if (currentOffsetMap) panel.webview.postMessage(currentOffsetMap);
+      reparsePage(page, doc.getText(), doc.version);
+      const fm: FileMeta = { type: 'fileMeta', path: page.relativePath, isTemplated: page.isTemplated };
+      if (page.currentOffsetMap) panel.webview.postMessage(page.currentOffsetMap);
       panel.webview.postMessage(fm);
       panel.webview.postMessage({ type: 'reload', reason: 'discard' });
       panel.reveal(panel.viewColumn ?? vscode.ViewColumn.Beside, false);
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse discard failed: ${message}`);
     } finally {
@@ -282,6 +448,10 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   async function handleMessage(raw: unknown): Promise<void> {
     if (!raw || typeof raw !== 'object') return;
     const msg = raw as IncomingMessage;
+    if ('path' in msg && typeof msg.path === 'string') {
+      const page = ensurePageForRel(msg.path);
+      if (page) activeRelativePath = page.relativePath;
+    }
     switch (msg.type) {
       case '__webview_action':
         if (msg.action === 'editAnyway') {
@@ -371,12 +541,14 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     }
   }
 
-  function sendInitialState(_msg: Ready): void {
-    if (currentOffsetMap) panel.webview.postMessage(currentOffsetMap);
+  function sendInitialState(msg: Ready): void {
+    const page = msg.path ? pageForMessage(msg) : activePage();
+    activeRelativePath = page.relativePath;
+    if (page.currentOffsetMap) panel.webview.postMessage(page.currentOffsetMap);
     panel.webview.postMessage({
       type: 'fileMeta',
-      path: relativePath,
-      isTemplated,
+      path: page.relativePath,
+      isTemplated: page.isTemplated,
     } satisfies FileMeta);
     postDocumentState();
     postAgentSelectionState();
@@ -384,51 +556,76 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     void postAgentConnectionState();
   }
 
-  function recordIfNonEmpty(
-    entry: UndoEntry,
+  function captureSnapshot(activePath = activeRelativePath): SiteSnapshot {
+    const files: Record<string, SnapshotFile> = {};
+    for (const page of pages.values()) {
+      const doc = findOpenDocument(page);
+      const text = doc?.getText() ?? readPageFromDisk(page);
+      if (text === null) continue;
+      files[page.relativePath] = {
+        version: doc?.version ?? page.currentVersion,
+        hash: hashText(text),
+        text,
+      };
+    }
+    return { activePath, files };
+  }
+
+  function recordSnapshot(label: string, before: SiteSnapshot, after: SiteSnapshot): void {
+    siteHistory.record({
+      id: String(nextEditTransactionId++),
+      label,
+      before,
+      after,
+    });
+  }
+
+  async function applySourceEdit(
+    page: PageState,
     label: string,
-    sourceBefore: string,
-  ): void {
-    if (entry.forward.length === 0) return;
-    editHistory.record(
-      createEditTransaction({
-        id: String(nextEditTransactionId++),
-        label,
-        sourceBefore,
-        sourceAfter: document.getText(),
-        forward: entry.forward,
-        versionBefore: entry.versionBefore,
-        versionAfter: entry.versionAfter,
-      }),
-    );
+    run: (doc: vscode.TextDocument, before: SiteSnapshot) => Promise<{ ok: boolean; result?: { expected?: number; actual?: number; reason?: string } }>,
+  ): Promise<void> {
+    activeRelativePath = page.relativePath;
+    const doc = await openDocumentForPage(page);
+    const before = captureSnapshot(page.relativePath);
+    const outcome = await run(doc, before);
+    if (!outcome.ok) return;
+    recordSnapshot(label, before, captureSnapshot(page.relativePath));
+    postDocumentState();
+  }
+
+  function postStale(page: PageState, expected: number, actual: number): void {
+    page.expectedSelfEditVersion = null;
+    panel.webview.postMessage({
+      type: 'staleCommit',
+      path: page.relativePath,
+      expectedVersion: expected,
+      actualVersion: actual,
+    });
   }
 
   async function handleEditCommit(msg: EditCommit): Promise<void> {
+    const page = pageForMessage(msg);
     try {
-      const sourceBefore = document.getText();
-      const result = await applyEditCommit({
-        document,
-        currentVersion,
-        currentOffsetMap,
-        commit: msg,
-        beforeApply: (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-        escapeReplacement,
-      });
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        panel.webview.postMessage({
-          type: 'staleCommit',
-          expectedVersion: result.expected,
-          actualVersion: result.actual,
+      await applySourceEdit(page, 'Text edit', async (doc) => {
+        const result = await applyEditCommit({
+          document: doc,
+          currentVersion: page.currentVersion,
+          currentOffsetMap: page.currentOffsetMap,
+          commit: msg,
+          beforeApply: (expected) => {
+            page.expectedSelfEditVersion = expected;
+          },
+          escapeReplacement: page.escapeReplacement,
         });
-      } else {
-        recordIfNonEmpty(result.undoEntry, 'Text edit', sourceBefore);
-        postDocumentState();
-      }
+        if (!result.ok) {
+          postStale(page, result.expected, result.actual);
+          return { ok: false };
+        }
+        return { ok: result.undoEntry.forward.length > 0 };
+      });
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -436,30 +633,26 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleEditRemove(msg: EditRemove): Promise<void> {
+    const page = pageForMessage(msg);
     try {
-      const sourceBefore = document.getText();
-      const result = await applyRemoveCommit({
-        document,
-        currentVersion,
-        currentOffsetMap,
-        commit: msg,
-        beforeApply: (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-      });
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        panel.webview.postMessage({
-          type: 'staleCommit',
-          expectedVersion: result.expected,
-          actualVersion: result.actual,
+      await applySourceEdit(page, 'Remove element', async (doc) => {
+        const result = await applyRemoveCommit({
+          document: doc,
+          currentVersion: page.currentVersion,
+          currentOffsetMap: page.currentOffsetMap,
+          commit: msg,
+          beforeApply: (expected) => {
+            page.expectedSelfEditVersion = expected;
+          },
         });
-      } else {
-        recordIfNonEmpty(result.undoEntry, 'Remove element', sourceBefore);
-        postDocumentState();
-      }
+        if (!result.ok) {
+          postStale(page, result.expected, result.actual);
+          return { ok: false };
+        }
+        return { ok: result.undoEntry.forward.length > 0 };
+      });
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse remove failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -467,31 +660,27 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleEditBlockHtml(msg: EditBlockHtml): Promise<void> {
+    const page = pageForMessage(msg);
     try {
-      const sourceBefore = document.getText();
-      const result = await applyBlockHtmlCommit({
-        document,
-        currentVersion,
-        currentOffsetMap,
-        commit: msg,
-        beforeApply: (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-        escapeReplacement,
-      });
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        panel.webview.postMessage({
-          type: 'staleCommit',
-          expectedVersion: result.expected,
-          actualVersion: result.actual,
+      await applySourceEdit(page, 'Block HTML edit', async (doc) => {
+        const result = await applyBlockHtmlCommit({
+          document: doc,
+          currentVersion: page.currentVersion,
+          currentOffsetMap: page.currentOffsetMap,
+          commit: msg,
+          beforeApply: (expected) => {
+            page.expectedSelfEditVersion = expected;
+          },
+          escapeReplacement: page.escapeReplacement,
         });
-      } else {
-        recordIfNonEmpty(result.undoEntry, 'Block HTML edit', sourceBefore);
-        postDocumentState();
-      }
+        if (!result.ok) {
+          postStale(page, result.expected, result.actual);
+          return { ok: false };
+        }
+        return { ok: result.undoEntry.forward.length > 0 };
+      });
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse block edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -499,30 +688,26 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleEditBlockTag(msg: EditBlockTag): Promise<void> {
+    const page = pageForMessage(msg);
     try {
-      const sourceBefore = document.getText();
-      const result = await applyBlockTagCommit({
-        document,
-        currentVersion,
-        currentOffsetMap,
-        commit: msg,
-        beforeApply: (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-      });
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        panel.webview.postMessage({
-          type: 'staleCommit',
-          expectedVersion: result.expected,
-          actualVersion: result.actual,
+      await applySourceEdit(page, 'Tag edit', async (doc) => {
+        const result = await applyBlockTagCommit({
+          document: doc,
+          currentVersion: page.currentVersion,
+          currentOffsetMap: page.currentOffsetMap,
+          commit: msg,
+          beforeApply: (expected) => {
+            page.expectedSelfEditVersion = expected;
+          },
         });
-      } else {
-        recordIfNonEmpty(result.undoEntry, 'Tag edit', sourceBefore);
-        postDocumentState();
-      }
+        if (!result.ok) {
+          postStale(page, result.expected, result.actual);
+          return { ok: false };
+        }
+        return { ok: result.undoEntry.forward.length > 0 };
+      });
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse tag transform failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -530,33 +715,27 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleEditElementAttrs(msg: EditElementAttrs): Promise<void> {
+    const page = pageForMessage(msg);
     try {
-      const sourceBefore = document.getText();
-      const result = await applyAttrEditCommit({
-        document,
-        currentVersion,
-        currentOffsetMap,
-        commit: msg,
-        beforeApply: (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-        escapeReplacement,
-      });
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        if (result.reason === 'stale') {
-          panel.webview.postMessage({
-            type: 'staleCommit',
-            expectedVersion: result.expected,
-            actualVersion: result.actual,
-          });
+      await applySourceEdit(page, 'Attribute edit', async (doc) => {
+        const result = await applyAttrEditCommit({
+          document: doc,
+          currentVersion: page.currentVersion,
+          currentOffsetMap: page.currentOffsetMap,
+          commit: msg,
+          beforeApply: (expected) => {
+            page.expectedSelfEditVersion = expected;
+          },
+          escapeReplacement: page.escapeReplacement,
+        });
+        if (!result.ok) {
+          if (result.reason === 'stale') postStale(page, result.expected, result.actual);
+          return { ok: false };
         }
-      } else {
-        recordIfNonEmpty(result.undoEntry, 'Attribute edit', sourceBefore);
-        postDocumentState();
-      }
+        return { ok: result.undoEntry.forward.length > 0 };
+      });
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse attribute edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -564,79 +743,101 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleEditCssDeclaration(msg: EditCssDeclaration): Promise<void> {
+    const page = pageForMessage(msg);
     try {
-      const sourceBefore = document.getText();
-      const result = await applyCssDeclarationCommit({
-        document,
-        currentVersion,
-        commit: msg,
-        beforeApply: (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-        escapeReplacement,
-      });
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        if (result.reason === 'stale') {
-          panel.webview.postMessage({
-            type: 'staleCommit',
-            expectedVersion: result.expected,
-            actualVersion: result.actual,
-          });
-        } else {
-          panel.webview.postMessage({
-            type: 'editFailed',
-            message:
-              'That CSS rule could not be saved. Finesse can currently save class-rule edits only when the rule lives in a <style> block in this file.',
-          });
-          postDocumentState();
+      await applySourceEdit(page, 'CSS edit', async (doc) => {
+        const result = await applyCssDeclarationCommit({
+          document: doc,
+          currentVersion: page.currentVersion,
+          commit: msg,
+          beforeApply: (expected) => {
+            page.expectedSelfEditVersion = expected;
+          },
+          escapeReplacement: page.escapeReplacement,
+        });
+        if (!result.ok) {
+          if (result.reason === 'stale') {
+            postStale(page, result.expected, result.actual);
+          } else {
+            panel.webview.postMessage({
+              type: 'editFailed',
+              path: page.relativePath,
+              message:
+                'That CSS rule could not be saved. Finesse can currently save class-rule edits only when the rule lives in a <style> block in this file.',
+            });
+            postDocumentState();
+          }
+          return { ok: false };
         }
-      } else {
-        recordIfNonEmpty(result.undoEntry, 'CSS edit', sourceBefore);
-        postDocumentState();
-      }
+        return { ok: result.undoEntry.forward.length > 0 };
+      });
     } catch (err) {
-      expectedSelfEditVersion = null;
+      page.expectedSelfEditVersion = null;
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse CSS edit failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
     }
   }
 
+  async function restoreSnapshot(snapshot: SiteSnapshot): Promise<boolean> {
+    const docs = new Map<string, vscode.TextDocument>();
+    for (const relPath of Object.keys(snapshot.files)) {
+      const page = ensurePageForRel(relPath);
+      if (!page) return false;
+      const doc = await openDocumentForPage(page);
+      docs.set(relPath, doc);
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    for (const [relPath, file] of Object.entries(snapshot.files)) {
+      const doc = docs.get(relPath);
+      if (!doc) return false;
+      const page = ensurePageForRel(relPath);
+      const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
+      const targetPage = page;
+      if (targetPage) targetPage.expectedSelfEditVersion = doc.version + 1;
+      edit.replace(doc.uri, fullRange, file.text);
+    }
+    const ok = await vscode.workspace.applyEdit(edit);
+    if (!ok) return false;
+    for (const [relPath, doc] of docs) {
+      const page = ensurePageForRel(relPath);
+      if (page) reparsePage(page, doc.getText(), doc.version);
+    }
+    activeRelativePath = snapshot.activePath;
+    return true;
+  }
+
+  async function replaySnapshot(
+    transaction: SiteTransaction,
+    expected: SiteSnapshot,
+    target: SiteSnapshot,
+  ): Promise<boolean> {
+    for (const [relPath, file] of Object.entries(expected.files)) {
+      const page = ensurePageForRel(relPath);
+      if (!page) return false;
+      const doc = await openDocumentForPage(page);
+      if (hashText(doc.getText()) !== file.hash) return false;
+    }
+    return restoreSnapshot(target);
+  }
+
   async function handleUndoRequest(): Promise<void> {
-    const op = editHistory.beginUndo();
-    if (!op) return;
-    const entry = op.transaction;
+    const transaction = siteHistory.peekUndo();
+    if (!transaction) return;
     try {
-      if (hashText(document.getText()) !== entry.sourceHashAfter) {
-        op.abort();
-        editHistory.markExternalConflict('stale-replay');
+      const ok = await replaySnapshot(transaction, transaction.after, transaction.before);
+      if (!ok) {
+        siteHistory.markExternalConflict();
         panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
         postDocumentState();
         return;
       }
-      const result = await applyRecordedSplices(
-        document,
-        entry.inverse,
-        currentVersion,
-        (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-      );
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        op.abort();
-        editHistory.markExternalConflict('stale-replay');
-        panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
-        postDocumentState();
-        return;
-      }
-      op.commit();
+      siteHistory.commitUndo(transaction);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
       postDocumentState();
     } catch (err) {
-      expectedSelfEditVersion = null;
-      op.abort();
-      editHistory.markExternalConflict('stale-replay');
+      siteHistory.markExternalConflict();
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse undo failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -645,39 +846,21 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function handleRedoRequest(): Promise<void> {
-    const op = editHistory.beginRedo();
-    if (!op) return;
-    const entry = op.transaction;
+    const transaction = siteHistory.peekRedo();
+    if (!transaction) return;
     try {
-      if (hashText(document.getText()) !== entry.sourceHashBefore) {
-        op.abort();
-        editHistory.markExternalConflict('stale-replay');
+      const ok = await replaySnapshot(transaction, transaction.before, transaction.after);
+      if (!ok) {
+        siteHistory.markExternalConflict();
         panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
         postDocumentState();
         return;
       }
-      const result = await applyRecordedSplices(
-        document,
-        entry.forward,
-        currentVersion,
-        (expected) => {
-          expectedSelfEditVersion = expected;
-        },
-      );
-      if (!result.ok) {
-        expectedSelfEditVersion = null;
-        op.abort();
-        editHistory.markExternalConflict('stale-replay');
-        panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
-        postDocumentState();
-        return;
-      }
-      op.commit();
+      siteHistory.commitRedo(transaction);
+      panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
       postDocumentState();
     } catch (err) {
-      expectedSelfEditVersion = null;
-      op.abort();
-      editHistory.markExternalConflict('stale-replay');
+      siteHistory.markExternalConflict();
       const message = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(`Finesse redo failed: ${message}`);
       panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
@@ -687,6 +870,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   function handleElementSelectionChanged(msg: ElementSelectionChanged): void {
     currentAgentSelection = msg.selection;
+    if (msg.selection?.path) activeRelativePath = normalizeRelPath(msg.selection.path);
     postAgentSelectionState();
   }
 
@@ -713,8 +897,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     }
     if (
       currentAgentSelection &&
-      (currentAgentSelection.documentVersion !== currentVersion ||
-        currentAgentSelection.documentVersion !== document.version)
+      (() => {
+        const selectionPage =
+          (currentAgentSelection.path ? ensurePageForRel(currentAgentSelection.path) : null) ??
+          activePage();
+        const selectionDoc = findOpenDocument(selectionPage);
+        return (
+          currentAgentSelection.documentVersion !== selectionPage.currentVersion ||
+          (selectionDoc !== undefined &&
+            currentAgentSelection.documentVersion !== selectionDoc.version)
+        );
+      })()
     ) {
       currentAgentSelection = null;
       postAgentSelectionState();
@@ -730,21 +923,25 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       runProvider === 'cursor' ? cfg.agentCursorModel : cfg.agentClaudeModel;
     const targetLabel = currentAgentSelection
       ? selectionLabel(currentAgentSelection)
-      : relativePath;
+      : activeRelativePath;
     postAgentRunStatus(
       'starting',
       `Running ${providerLabel} on ${targetLabel}`,
       runProvider,
     );
     try {
+      const agentPage =
+        (currentAgentSelection?.path ? ensurePageForRel(currentAgentSelection.path) : null) ??
+        activePage();
+      const agentDoc = await openDocumentForPage(agentPage);
       await runSelectedElementAgent({
         providerId: runProvider,
         context: deps.context,
         workspaceRoot: deps.workspaceRoot,
         model,
-        document,
-        relativePath,
-        offsetMap: currentOffsetMap ?? undefined,
+        document: agentDoc,
+        relativePath: agentPage.relativePath,
+        offsetMap: agentPage.currentOffsetMap ?? undefined,
         selection: currentAgentSelection ?? undefined,
         userPrompt: trimmed,
         onStatus: (text) => postAgentRunStatus('status', text, runProvider),
@@ -776,40 +973,62 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     key,
     relativePath,
     get currentVersion() {
-      return currentVersion;
+      return activePage().currentVersion;
     },
     set currentVersion(v: number) {
-      currentVersion = v;
+      activePage().currentVersion = v;
     },
     get currentOffsetMap() {
-      return currentOffsetMap;
+      return activePage().currentOffsetMap;
     },
     set currentOffsetMap(v: OffsetMap | null) {
-      currentOffsetMap = v;
+      activePage().currentOffsetMap = v;
     },
     get currentPreviewHtml() {
-      return currentPreviewHtml;
+      return activePage().currentPreviewHtml;
     },
     set currentPreviewHtml(v: string | null) {
-      currentPreviewHtml = v;
+      activePage().currentPreviewHtml = v;
     },
     get currentInjectedPreviewHtml() {
-      return currentInjectedPreviewHtml;
+      return activePage().currentInjectedPreviewHtml;
     },
     set currentInjectedPreviewHtml(v: string | null) {
-      currentInjectedPreviewHtml = v;
+      activePage().currentInjectedPreviewHtml = v;
     },
     get isTemplated() {
-      return isTemplated;
+      return activePage().isTemplated;
     },
     set isTemplated(v: boolean) {
-      isTemplated = v;
+      activePage().isTemplated = v;
     },
     get expectedSelfEditVersion() {
-      return expectedSelfEditVersion;
+      return activePage().expectedSelfEditVersion;
     },
     set expectedSelfEditVersion(v: number | null) {
-      expectedSelfEditVersion = v;
+      activePage().expectedSelfEditVersion = v;
+    },
+    handlesDocument(uri) {
+      return trackedPageForUri(uri) !== null;
+    },
+    onTextDocumentChanged(event) {
+      const page = trackedPageForUri(event.document.uri);
+      if (!page) return;
+      if (event.document.version === page.currentVersion) return;
+      const isSelf =
+        page.expectedSelfEditVersion !== null &&
+        event.document.version === page.expectedSelfEditVersion;
+      if (isSelf) page.expectedSelfEditVersion = null;
+      this.onDocumentChanged(event.document, isSelf ? 'self' : 'external');
+    },
+    getInjectedPreviewHtmlForPath(relPath) {
+      return ensurePageForRel(relPath)?.currentInjectedPreviewHtml ?? null;
+    },
+    getOffsetMapForPath(relPath) {
+      return ensurePageForRel(relPath)?.currentOffsetMap ?? null;
+    },
+    isTemplatedPath(relPath) {
+      return ensurePageForRel(relPath)?.isTemplated ?? false;
     },
     postToWebview(msg) {
       panel.webview.postMessage(msg);
@@ -821,23 +1040,25 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       panel.reveal(vscode.ViewColumn.Beside, true);
     },
     onDocumentChanged(doc, kind) {
-      reparse(doc.getText(), doc.version);
-      const fm: FileMeta = { type: 'fileMeta', path: relativePath, isTemplated };
+      const page = trackedPageForUri(doc.uri) ?? createPageState(doc.uri, doc);
+      reparsePage(page, doc.getText(), doc.version);
+      const fm: FileMeta = { type: 'fileMeta', path: page.relativePath, isTemplated: page.isTemplated };
       if (kind === 'self') {
-        if (currentOffsetMap) {
+        if (page.currentOffsetMap) {
           panel.webview.postMessage({
             type: 'editAck',
+            path: page.relativePath,
             documentVersion: doc.version,
-            offsetMap: currentOffsetMap,
+            offsetMap: page.currentOffsetMap,
           });
         }
         panel.webview.postMessage(fm);
       } else {
         // External edits invalidate recorded splice offsets. Keep the history
         // present but disabled so stale undo/redo cannot replay into new text.
-        editHistory.markExternalConflict('external-document-change');
+        siteHistory.markExternalConflict();
         currentAgentSelection = null;
-        if (currentOffsetMap) panel.webview.postMessage(currentOffsetMap);
+        if (page.currentOffsetMap) panel.webview.postMessage(page.currentOffsetMap);
         panel.webview.postMessage(fm);
         panel.webview.postMessage({ type: 'reload', reason: 'external-edit' });
       }
@@ -1013,6 +1234,14 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
 function relativeWebPath(workspaceRoot: string, fsPath: string): string {
   const rel = path.relative(workspaceRoot, fsPath);
   return rel.split(path.sep).join('/');
+}
+
+function normalizeRelPath(relPath: string): string {
+  return decodeURIComponent(relPath)
+    .replace(/^\/+/, '')
+    .split(/[\\/]+/)
+    .filter((segment) => segment.length > 0)
+    .join('/');
 }
 
 function encodePath(relPath: string): string {

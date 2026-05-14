@@ -3,7 +3,6 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { registerCommands } from './commands';
 import { onConfigChange, readConfig, type ResolvedConfig } from './config';
-import { handleDocumentChange } from './documentWatcher';
 import { decideExternalFileConflict } from './externalFileConflict';
 import { FileWatcher } from './fileWatcher';
 import type { PreviewPanel } from './panel';
@@ -52,8 +51,8 @@ export function activate(context: vscode.ExtensionContext): void {
       const panels = state?.panels;
       if (!panels) return;
       for (const panel of panels.values()) {
-        if (panel.documentUri.toString() === event.document.uri.toString()) {
-          handleDocumentChange(event, panel);
+        if (panel.handlesDocument(event.document.uri)) {
+          panel.onTextDocumentChanged(event);
         }
       }
     }),
@@ -61,7 +60,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const panels = state?.panels;
       if (!panels) return;
       for (const panel of panels.values()) {
-        if (panel.documentUri.toString() === doc.uri.toString()) {
+        if (panel.handlesDocument(doc.uri)) {
           panel.onDocumentSaved(doc);
         }
       }
@@ -142,9 +141,11 @@ async function ensureServer(): Promise<PreviewServer> {
     runtimeBundlePath,
     getDocumentText: (relPath) => readDocumentText(workspaceRoot, relPath),
     getInjectedPreviewHtml: (relPath) =>
-      findPanelByRel(workspaceRoot, relPath)?.currentInjectedPreviewHtml ?? null,
-    getOffsetMap: (relPath) => findPanelByRel(workspaceRoot, relPath)?.currentOffsetMap ?? null,
-    isTemplated: (relPath) => findPanelByRel(workspaceRoot, relPath)?.isTemplated ?? false,
+      findPanelForPath(workspaceRoot, relPath)?.getInjectedPreviewHtmlForPath(relPath) ?? null,
+    getOffsetMap: (relPath) =>
+      findPanelForPath(workspaceRoot, relPath)?.getOffsetMapForPath(relPath) ?? null,
+    isTemplated: (relPath) =>
+      findPanelForPath(workspaceRoot, relPath)?.isTemplatedPath(relPath) ?? false,
   });
   await server.start();
   state.server = server;
@@ -170,7 +171,7 @@ async function handleExternalHtmlChange(uri: vscode.Uri): Promise<void> {
   if (!state) return;
   const fsPath = uri.fsPath;
   const panel = Array.from(state.panels.values()).find(
-    (p) => p.documentUri.fsPath === fsPath,
+    (p) => p.handlesDocument(uri) || p.documentUri.fsPath === fsPath,
   );
   if (!panel) return;
 
@@ -235,12 +236,12 @@ function readDocumentText(workspaceRoot: string, relPath: string): string | null
   return null;
 }
 
-function findPanelByRel(workspaceRoot: string, relPath: string): PreviewPanel | null {
+function findPanelForPath(workspaceRoot: string, relPath: string): PreviewPanel | null {
   const panels = state?.panels;
   if (!panels) return null;
   for (const p of panels.values()) {
     const r = path.relative(workspaceRoot, p.documentUri.fsPath).split(path.sep).join('/');
     if (r === relPath) return p;
   }
-  return null;
+  return panels.values().next().value ?? null;
 }

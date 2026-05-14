@@ -182,6 +182,10 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   const stateListeners: Array<(state: EditState) => void> = [];
   const selectionListeners: Array<(el: HTMLElement | null) => void> = [];
 
+  function post(msg: IframeMessage): void {
+    opts.postToParent({ ...msg, path: fileMeta.path } as IframeMessage);
+  }
+
   function notifyState(state: EditState): void {
     for (const l of stateListeners) {
       try {
@@ -391,7 +395,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       const after = currentTexts.map((t) => t.data);
       const edits = computeEdits(ids, snapshotTexts, after);
       if (edits.length > 0) {
-        opts.postToParent({
+        post({
           type: 'editCommit',
           documentVersion: offsetMap.documentVersion,
           edits,
@@ -403,7 +407,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
         if (newTag) queueTagAfterAck(blockId, newTag);
       } else if (newTag) {
         // Tag-only change, byte-perfect inner content.
-        opts.postToParent({
+        post({
           type: 'editBlockTag',
           documentVersion: offsetMap.documentVersion,
           blockId,
@@ -419,7 +423,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       notifyState({ kind: 'idle' });
       return;
     }
-    opts.postToParent({
+    post({
       type: 'editBlockHtml',
       documentVersion: offsetMap.documentVersion,
       blockId,
@@ -438,7 +442,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     if (!queuedTag || !offsetMap) return;
     const q = queuedTag;
     queuedTag = null;
-    opts.postToParent({
+    post({
       type: 'editBlockTag',
       documentVersion: offsetMap.documentVersion,
       blockId: q.blockId,
@@ -456,25 +460,25 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     block.removeAttribute('spellcheck');
     block.innerHTML = snapshotHTML;
     if (blockId !== null) {
-      opts.postToParent({ type: 'editCancel', blockId });
+      post({ type: 'editCancel', blockId });
     }
     notifyState({ kind: 'idle' });
   }
 
   function requestSave(): void {
-    opts.postToParent({ type: 'saveRequest' });
+    post({ type: 'saveRequest' });
   }
 
   function requestUndo(): void {
-    opts.postToParent({ type: 'undoRequest' });
+    post({ type: 'undoRequest' });
   }
 
   function requestRedo(): void {
-    opts.postToParent({ type: 'redoRequest' });
+    post({ type: 'redoRequest' });
   }
 
   function requestCommandPalette(): void {
-    opts.postToParent({ type: 'commandPaletteRequest' });
+    post({ type: 'commandPaletteRequest' });
   }
 
   function selectElement(el: HTMLElement): void {
@@ -493,7 +497,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     if (activeBlock) cancelEdit();
     // Optimistically remove from DOM; host responds with editAck + fresh offset map.
     el.remove();
-    opts.postToParent({
+    post({
       type: 'editRemove',
       documentVersion: offsetMap.documentVersion,
       elementIds: [elementId],
@@ -502,6 +506,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   }
 
   function applyOffsetMap(map: OffsetMap): void {
+    if (map.path && map.path !== fileMeta.path) return;
     offsetMap = map;
     rebuild();
     // If we deferred a tag rename behind a text commit, fire it now that the
@@ -523,7 +528,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     // the rich snapshot to the host so the chrome side panel sees the new
     // inline style after a self-edit ack.
     if (selectedEl && selectedEl.isConnected) {
-      opts.postToParent({
+      post({
         type: 'elementSelectionChanged',
         selection: describeElement(selectedEl),
       });
@@ -574,7 +579,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       block.removeAttribute('spellcheck');
       block.innerHTML = snapshotHTML;
       if (blockId !== null) {
-        opts.postToParent({ type: 'editCancel', blockId });
+        post({ type: 'editCancel', blockId });
       }
       notifyState({ kind: 'idle' });
     }
@@ -601,6 +606,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     const blockId = elementToBlockId.get(el);
     const rect = el.getBoundingClientRect();
     return {
+      path: fileMeta.path,
       documentVersion: offsetMap.documentVersion,
       elementId,
       blockId,
@@ -651,7 +657,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
 
   function announceElementSelection(el: HTMLElement | null): void {
     selectedEl = el;
-    opts.postToParent({
+    post({
       type: 'elementSelectionChanged',
       selection: el ? describeElement(el) : null,
     });
@@ -666,7 +672,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
 
   function sendBlockHtmlCommit(blockId: number, newInnerHtml: string): void {
     if (!offsetMap) return;
-    opts.postToParent({
+    post({
       type: 'editBlockHtml',
       documentVersion: offsetMap.documentVersion,
       blockId,
@@ -676,7 +682,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
 
   function sendBlockTagCommit(blockId: number, newTagName: string): void {
     if (!offsetMap) return;
-    opts.postToParent({
+    post({
       type: 'editBlockTag',
       documentVersion: offsetMap.documentVersion,
       blockId,
@@ -732,7 +738,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     if (!offsetMap) return false;
     const elementId = elementToElementId.get(el);
     if (elementId === undefined) return false;
-    opts.postToParent({
+    post({
       type: 'editElementAttrs',
       documentVersion: offsetMap.documentVersion,
       elementId,
@@ -780,7 +786,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     // selector and apply the property change so the preview reflects it
     // before the host responds.
     applyCssOptimistic(document, input.selector, input.property, input.value);
-    opts.postToParent({
+    post({
       type: 'editCssDeclaration',
       documentVersion: offsetMap.documentVersion,
       selector: input.selector,

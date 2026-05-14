@@ -268,7 +268,7 @@ function bootIframe(init: InitData): void {
         showEditFailedBanner(data.message);
         break;
       case 'fileMeta':
-        updateStatus({ locked: data.isTemplated });
+        updateStatus({ file: data.path, locked: data.isTemplated });
         sidePanel?.setLocked(data.isTemplated);
         if (data.isTemplated) {
           showTemplatedBanner({ onEditAnyway: requestEditAnyway });
@@ -281,6 +281,7 @@ function bootIframe(init: InitData): void {
       case 'documentState':
         currentDirty = data.isDirty;
         updateStatus({
+          file: data.path,
           isDirty: data.isDirty,
           canUndo: data.canUndo,
           canRedo: data.canRedo,

@@ -26,7 +26,7 @@ test('serves a copied detailed fixture with runtime instrumentation', async ({ p
     await expect(page.locator('#finesse-selection')).toBeAttached();
 
     const ready = await waitForMessages(page, 'ready', 1);
-    expect(ready[0]).toEqual({ type: 'ready' });
+    expect(ready[0]).toMatchObject({ type: 'ready', path: 'detailed-example.html' });
     expect(harness.copyExists()).toBe(true);
   } finally {
     await harness.dispose();
@@ -97,6 +97,87 @@ test('edits the copied source, saves it, validates the file, then cleans up', as
     const copyPath = harness.copyPath;
     await harness.dispose();
     expect(fs.existsSync(copyPath)).toBe(false);
+  }
+});
+
+test('navigates and edits a real multi-file HTML project with session snapshots', async ({ page }) => {
+  const harness = await createMultiFileHarness(page, {
+    'index.html': `<!doctype html>
+<html>
+  <head>
+    <link rel="stylesheet" href="./site.css">
+    <title>Home</title>
+  </head>
+  <body>
+    <nav><a id="to-about" href="./about.html">About</a></nav>
+    <main>
+      <h1 id="home-title">Home page</h1>
+      <p id="home-copy">Home copy</p>
+    </main>
+  </body>
+</html>`,
+    'about.html': `<!doctype html>
+<html>
+  <head>
+    <link rel="stylesheet" href="./site.css">
+    <title>About</title>
+  </head>
+  <body>
+    <nav><a id="to-home" href="./index.html">Home</a></nav>
+    <main>
+      <h1 id="about-title">About page</h1>
+      <p id="about-copy">About copy</p>
+    </main>
+  </body>
+</html>`,
+    'site.css': 'body { font-family: system-ui, sans-serif; } main { color: rgb(20, 40, 60); }',
+  });
+
+  try {
+    await page.goto(harness.url('index.html'));
+    let ready = await waitForMessages(page, 'ready', 1);
+    expect(ready.at(-1)).toMatchObject({ type: 'ready', path: 'index.html' });
+    await expect(page.locator('#home-copy')).toHaveAttribute('data-finesse-id', /\d+/);
+
+    await page.locator('#to-about').click();
+    await page.waitForURL(/\/about\.html$/);
+    ready = await waitForMessages(page, 'ready', 1);
+    expect(ready.at(-1)).toMatchObject({ type: 'ready', path: 'about.html' });
+    await expect(page.locator('#about-copy')).toHaveAttribute('data-finesse-id', /\d+/);
+
+    await page.locator('#about-copy').click();
+    await page.keyboard.type(' edited');
+    await page.keyboard.press('Enter');
+    await waitForMessages(page, 'editCommit', 1);
+    await waitForMessages(page, 'editAck', 1);
+    expect(harness.currentText('about.html')).toContain('About copy edited');
+    expect(harness.diskText('about.html')).not.toContain('About copy edited');
+
+    await pressSaveShortcut(page);
+    await waitForMessages(page, 'saveRequest', 1);
+    expect(harness.diskText('about.html')).toContain('About copy edited');
+
+    await page.locator('#to-home').click();
+    await page.waitForURL(/\/index\.html$/);
+    ready = await waitForMessages(page, 'ready', 1);
+    expect(ready.at(-1)).toMatchObject({ type: 'ready', path: 'index.html' });
+
+    await page.locator('#home-copy').click();
+    await page.keyboard.type(' edited');
+    await page.keyboard.press('Enter');
+    await waitForMessages(page, 'editCommit', 1);
+    await waitForMessages(page, 'editAck', 1);
+    expect(harness.currentText('index.html')).toContain('Home copy edited');
+    expect(harness.currentText('about.html')).toContain('About copy edited');
+
+    await pressUndoShortcut(page);
+    await waitForMessages(page, 'undoRequest', 1);
+    await waitForMessages(page, 'editAck', 2);
+    expect(harness.currentText('index.html')).toContain('Home copy');
+    expect(harness.currentText('index.html')).not.toContain('Home copy edited');
+    expect(harness.currentText('about.html')).toContain('About copy edited');
+  } finally {
+    await harness.dispose();
   }
 });
 
@@ -554,6 +635,13 @@ interface Harness {
   dispose(): Promise<void>;
 }
 
+interface MultiFileHarness {
+  url(relativePath: string): string;
+  currentText(relativePath: string): string;
+  diskText(relativePath: string): string;
+  dispose(): Promise<void>;
+}
+
 async function createHarness(
   page: Page,
   sourceHtml?: string,
@@ -717,6 +805,175 @@ async function createHarness(
     currentText: () => source,
     diskText: () => fs.readFileSync(copyPath, 'utf-8'),
     replaceSource,
+    async dispose() {
+      await server.stop();
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+    },
+  };
+}
+
+async function createMultiFileHarness(
+  page: Page,
+  files: Record<string, string>,
+): Promise<MultiFileHarness> {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'finesse-multi-e2e-'));
+  for (const [relativeFilePath, contents] of Object.entries(files)) {
+    const filePath = path.join(workspaceRoot, relativeFilePath);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, contents);
+  }
+
+  const sources = new Map<string, string>();
+  const versions = new Map<string, number>();
+  const offsetMaps = new Map<string, OffsetMap>();
+  const dirty = new Set<string>();
+  for (const [relativeFilePath, contents] of Object.entries(files)) {
+    sources.set(relativeFilePath, contents);
+    if (/\.html?$/i.test(relativeFilePath)) {
+      versions.set(relativeFilePath, 1);
+      const map = walkEditable(contents, 1);
+      map.path = relativeFilePath;
+      offsetMaps.set(relativeFilePath, map);
+    }
+  }
+
+  type MultiSnapshot = Record<string, { text: string; hash: string; version: number }>;
+  type MultiTransaction = { before: MultiSnapshot; after: MultiSnapshot };
+  const undoStack: MultiTransaction[] = [];
+  const redoStack: MultiTransaction[] = [];
+
+  const server = createPreviewServer({
+    workspaceRoot,
+    port: 'auto',
+    runtimeBundlePath,
+    getDocumentText: (workspaceRelativePath) => sources.get(workspaceRelativePath) ?? null,
+    getInjectedPreviewHtml: () => null,
+    getOffsetMap: (workspaceRelativePath) => offsetMaps.get(workspaceRelativePath) ?? null,
+    isTemplated: () => false,
+  });
+
+  await page.exposeBinding(
+    '__finesseHostMessage',
+    async (_bindingSource, message: IframeMessage) => {
+      const responses = applyIframeMessage(message);
+      for (const response of responses) {
+        await page.evaluate((msg) => window.postMessage(msg, '*'), response);
+      }
+    },
+  );
+  await installMessageRecorder(page);
+
+  const port = await server.start();
+
+  function snapshot(): MultiSnapshot {
+    const out: MultiSnapshot = {};
+    for (const [relativeFilePath, text] of sources) {
+      if (!/\.html?$/i.test(relativeFilePath)) continue;
+      out[relativeFilePath] = {
+        text,
+        hash: hashText(text),
+        version: versions.get(relativeFilePath) ?? 1,
+      };
+    }
+    return out;
+  }
+
+  function record(before: MultiSnapshot, after: MultiSnapshot): void {
+    const changed = Object.keys(after).some((relativeFilePath) => {
+      return before[relativeFilePath]?.hash !== after[relativeFilePath]?.hash;
+    });
+    if (!changed) return;
+    undoStack.push({ before, after });
+    redoStack.length = 0;
+  }
+
+  function reparse(relativeFilePath: string): OffsetMap {
+    const nextVersion = (versions.get(relativeFilePath) ?? 1) + 1;
+    versions.set(relativeFilePath, nextVersion);
+    const source = sources.get(relativeFilePath);
+    if (source === undefined) throw new Error(`Unknown source: ${relativeFilePath}`);
+    const map = walkEditable(source, nextVersion);
+    map.path = relativeFilePath;
+    offsetMaps.set(relativeFilePath, map);
+    return map;
+  }
+
+  function documentState(relativeFilePath: string): HostMessage {
+    return {
+      type: 'documentState',
+      path: relativeFilePath,
+      isDirty: dirty.has(relativeFilePath),
+      canUndo: undoStack.length > 0,
+      canRedo: redoStack.length > 0,
+    };
+  }
+
+  function acknowledgeEdit(relativeFilePath: string): HostMessage[] {
+    dirty.add(relativeFilePath);
+    const offsetMap = reparse(relativeFilePath);
+    return [
+      {
+        type: 'editAck',
+        path: relativeFilePath,
+        documentVersion: versions.get(relativeFilePath) ?? 1,
+        offsetMap,
+      },
+      documentState(relativeFilePath),
+    ];
+  }
+
+  function restore(snap: MultiSnapshot): void {
+    for (const [relativeFilePath, file] of Object.entries(snap)) {
+      sources.set(relativeFilePath, file.text);
+      versions.set(relativeFilePath, file.version);
+      const map = walkEditable(file.text, file.version);
+      map.path = relativeFilePath;
+      offsetMaps.set(relativeFilePath, map);
+      dirty.add(relativeFilePath);
+    }
+  }
+
+  function applyIframeMessage(message: IframeMessage): HostMessage[] {
+    const relativeFilePath = message.path ?? 'index.html';
+    switch (message.type) {
+      case 'editCommit': {
+        const offsetMap = offsetMaps.get(relativeFilePath);
+        const source = sources.get(relativeFilePath);
+        if (!offsetMap || source === undefined) throw new Error(`Unknown editable file: ${relativeFilePath}`);
+        const before = snapshot();
+        const result = applyTextEdit(source, offsetMap, message);
+        sources.set(relativeFilePath, result.source);
+        const responses = acknowledgeEdit(relativeFilePath);
+        record(before, snapshot());
+        return responses;
+      }
+      case 'saveRequest':
+        fs.writeFileSync(path.join(workspaceRoot, relativeFilePath), sources.get(relativeFilePath) ?? '');
+        dirty.delete(relativeFilePath);
+        return [documentState(relativeFilePath)];
+      case 'undoRequest': {
+        const tx = undoStack.pop();
+        if (!tx) return [documentState(relativeFilePath)];
+        restore(tx.before);
+        redoStack.push(tx);
+        return acknowledgeEdit(relativeFilePath);
+      }
+      case 'redoRequest': {
+        const tx = redoStack.pop();
+        if (!tx) return [documentState(relativeFilePath)];
+        restore(tx.after);
+        undoStack.push(tx);
+        return acknowledgeEdit(relativeFilePath);
+      }
+      default:
+        return [];
+    }
+  }
+
+  return {
+    url: (relativeFilePath) => `http://127.0.0.1:${port}/${relativeFilePath}`,
+    currentText: (relativeFilePath) => sources.get(relativeFilePath) ?? '',
+    diskText: (relativeFilePath) => fs.readFileSync(path.join(workspaceRoot, relativeFilePath), 'utf-8'),
     async dispose() {
       await server.stop();
       fs.rmSync(workspaceRoot, { recursive: true, force: true });

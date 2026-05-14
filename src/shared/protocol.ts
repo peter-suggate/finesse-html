@@ -4,6 +4,8 @@
 
 export type OffsetMap = {
   type: 'offsetMap';
+  /** Workspace-relative path this map describes. Older harnesses may omit it. */
+  path?: string;
   documentVersion: number;
   /** Every selectable/removable element in document order. Includes blocks. */
   elements: Array<{
@@ -41,6 +43,8 @@ export type Reload = {
 
 export type EditAck = {
   type: 'editAck';
+  /** Workspace-relative path whose edit was acknowledged. */
+  path?: string;
   documentVersion: number;
   /** New offset map shipped alongside the ack so the iframe can resume editing. */
   offsetMap: OffsetMap;
@@ -48,12 +52,14 @@ export type EditAck = {
 
 export type StaleCommit = {
   type: 'staleCommit';
+  path?: string;
   expectedVersion: number;
   actualVersion: number;
 };
 
 export type EditFailed = {
   type: 'editFailed';
+  path?: string;
   message: string;
 };
 
@@ -67,6 +73,8 @@ export type FileMeta = {
 
 export type DocumentState = {
   type: 'documentState';
+  /** Active workspace-relative path this state describes. */
+  path?: string;
   /** Whether the underlying TextDocument has unsaved changes. */
   isDirty: boolean;
   /** Whether the preview has a Finesse edit available to undo. */
@@ -127,18 +135,23 @@ export type HostMessage =
 
 // ── Iframe → Host ─────────────────────────────────────────────────────────
 
-export type EditCommit = {
+export type DocumentScopedMessage = {
+  /** Workspace-relative path the message targets. Optional for legacy callers. */
+  path?: string;
+};
+
+export type EditCommit = DocumentScopedMessage & {
   type: 'editCommit';
   documentVersion: number;
   edits: Array<{ nodeId: number; newText: string }>;
 };
 
-export type EditCancel = {
+export type EditCancel = DocumentScopedMessage & {
   type: 'editCancel';
   blockId: number;
 };
 
-export type EditRemove = {
+export type EditRemove = DocumentScopedMessage & {
   type: 'editRemove';
   documentVersion: number;
   /** Element ids to remove from source, in any order. Host splices right-to-left. */
@@ -154,7 +167,7 @@ export type EditRemove = {
  * Bytes outside the block's `innerStartOffset..innerEndOffset` range are
  * preserved verbatim.
  */
-export type EditBlockHtml = {
+export type EditBlockHtml = DocumentScopedMessage & {
   type: 'editBlockHtml';
   documentVersion: number;
   blockId: number;
@@ -167,7 +180,7 @@ export type EditBlockHtml = {
  * Change a block's tag name (e.g. p → h2). Inner content is preserved
  * verbatim from source; only the opening and closing tags are rewritten.
  */
-export type EditBlockTag = {
+export type EditBlockTag = DocumentScopedMessage & {
   type: 'editBlockTag';
   documentVersion: number;
   blockId: number;
@@ -186,7 +199,7 @@ export type EditBlockTag = {
  * (including their original quoting and whitespace) are preserved verbatim.
  * Newly added attributes are appended to the end of the opening tag.
  */
-export type EditElementAttrs = {
+export type EditElementAttrs = DocumentScopedMessage & {
   type: 'editElementAttrs';
   documentVersion: number;
   elementId: number;
@@ -199,16 +212,19 @@ export type RuntimeError = {
   stack?: string;
 };
 
-export type Ready = { type: 'ready' };
+export type Ready = DocumentScopedMessage & {
+  type: 'ready';
+  documentVersion?: number;
+};
 
 /** Iframe asks host to save the underlying document (Cmd+S inside the preview). */
-export type SaveRequest = { type: 'saveRequest' };
+export type SaveRequest = DocumentScopedMessage & { type: 'saveRequest' };
 
 /** Iframe asks host to undo the most recent committed edit. */
-export type UndoRequest = { type: 'undoRequest' };
+export type UndoRequest = DocumentScopedMessage & { type: 'undoRequest' };
 
 /** Iframe asks host to redo the most recently undone edit. */
-export type RedoRequest = { type: 'redoRequest' };
+export type RedoRequest = DocumentScopedMessage & { type: 'redoRequest' };
 
 /** Iframe asks host to open the editor command palette. */
 export type CommandPaletteRequest = { type: 'commandPaletteRequest' };
@@ -270,6 +286,8 @@ export type AncestorRef = {
 };
 
 export type ElementSelectionSnapshot = {
+  /** Workspace-relative path of the source file containing this element. */
+  path?: string;
   documentVersion: number;
   elementId: number;
   blockId?: number;
@@ -320,7 +338,7 @@ export type ElementSelectionChanged = {
  * file. Used by the per-class sections in the side panel. Routed through the
  * iframe so the chrome doesn't have to talk directly to the host.
  */
-export type EditCssDeclaration = {
+export type EditCssDeclaration = DocumentScopedMessage & {
   type: 'editCssDeclaration';
   documentVersion: number;
   selector: string;

@@ -301,6 +301,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     if (nativeClickBypass) return true;
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return true;
     if (target && isInOverlayUi(target)) return true;
+    if (target && isSameOriginHtmlNavigation(target)) return true;
     return session.hasActiveBlock() && session.isInsideActive(target);
   }
 
@@ -342,6 +343,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     const target = elementFromEventTarget(e.target);
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (target && isInOverlayUi(target)) return;
+    if (shouldAllowNativeMouseEvent(e, target)) return;
     if (nativeClickBypass) {
       clearNavigationUi();
       return;
@@ -587,6 +589,24 @@ function isInteractiveClickTarget(target: Element): boolean {
     cur = cur.parentElement;
   }
   return false;
+}
+
+function isSameOriginHtmlNavigation(target: Element): boolean {
+  const anchor = target.closest('a[href]');
+  if (!(anchor instanceof HTMLAnchorElement)) return false;
+  if (anchor.target && anchor.target !== '_self') return false;
+  if (anchor.hasAttribute('download')) return false;
+  const raw = anchor.getAttribute('href') ?? '';
+  if (raw === '' || raw.startsWith('#')) return false;
+  let url: URL;
+  try {
+    url = new URL(raw, window.location.href);
+  } catch {
+    return false;
+  }
+  if (url.origin !== window.location.origin) return false;
+  if (url.pathname === window.location.pathname && url.hash) return false;
+  return /\.html?$/i.test(url.pathname);
 }
 
 function elementFromEventTarget(target: EventTarget | null): Element | null {

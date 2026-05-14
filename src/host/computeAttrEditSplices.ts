@@ -125,7 +125,7 @@ export function computeAttrEditSplices(input: ComputeAttrEditInput): ComputeAttr
 /** Conservative check that a value is safe to leave unquoted. */
 function isUnquotedSafe(value: string): boolean {
   if (value === '') return false;
-  return /^[A-Za-z0-9._:#\/-]+$/.test(value);
+  return /^[A-Za-z0-9._:#/-]+$/.test(value);
 }
 
 /**
