@@ -100,6 +100,41 @@ test('edits the copied source, saves it, validates the file, then cleans up', as
   }
 });
 
+test('keeps an unapplied text draft when Escape exits edit mode', async ({ page }) => {
+  const harness = await createHarness(page);
+  const escapedEdit = ' Kept after escape.';
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    await page.locator('#lead-copy').click();
+    await expect(page.locator('#lead-copy')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.type(escapedEdit);
+    await page.keyboard.press('Escape');
+
+    await waitForMessages(page, 'editCancel', 1);
+    await expect(page.locator('#lead-copy')).not.toHaveAttribute('contenteditable', 'true');
+    await expect(page.locator('#lead-copy')).toHaveAttribute('data-finesse-dirty', 'true');
+    await expect(page.locator('#lead-copy')).not.toContainText(escapedEdit);
+    expect(harness.currentText()).not.toContain(escapedEdit);
+    expect(harness.diskText()).not.toContain(escapedEdit);
+
+    await page.locator('#lead-copy').click();
+    await expect(page.locator('#lead-copy')).toHaveAttribute('contenteditable', 'true');
+    await expect(page.locator('#lead-copy')).toContainText(escapedEdit);
+    await page.keyboard.press('Escape');
+    await waitForMessages(page, 'editCancel', 2);
+
+    await pressSaveShortcut(page);
+    await waitForMessages(page, 'saveRequest', 1);
+    await waitForMessages(page, 'documentState', 1);
+    expect(harness.currentText()).not.toContain(escapedEdit);
+    expect(harness.diskText()).not.toContain(escapedEdit);
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test('navigates and edits a real multi-file HTML project with session snapshots', async ({ page }) => {
   const harness = await createMultiFileHarness(page, {
     'index.html': `<!doctype html>

@@ -420,7 +420,7 @@ export function setupOverlay(opts: OverlayOpts): void {
         }
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        session.cancelEdit();
+        session.suspendEdit();
         session.announceElementSelection(null);
         clearNavigationUi();
         const active = document.activeElement as HTMLElement | null;

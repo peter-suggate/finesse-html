@@ -68,6 +68,7 @@ export interface EditSession {
   findSelectableElement(target: Element | null): HTMLElement | null;
   beginEdit(block: HTMLElement): boolean;
   commitEdit(): void;
+  suspendEdit(): void;
   cancelEdit(): void;
   /** Remove any selectable element from source via host. */
   removeElement(el: HTMLElement): boolean;
@@ -162,6 +163,7 @@ export interface SetupOpts {
 }
 
 export function setupEditSession(opts: SetupOpts): EditSession {
+  installDraftIndicatorStyles();
   let offsetMap: OffsetMap | null = opts.initialOffsetMap;
   let fileMeta: FileMeta = opts.initialFileMeta;
 
@@ -179,6 +181,10 @@ export function setupEditSession(opts: SetupOpts): EditSession {
   let snapshotStructureHTML = '';
   let pendingNewTag: string | null = null;
   let selectedEl: HTMLElement | null = null;
+  const suspendedDrafts = new Map<
+    number,
+    { innerHTML: string; structureHTML: string; textValues?: string[] }
+  >();
   const stateListeners: Array<(state: EditState) => void> = [];
   const selectionListeners: Array<(el: HTMLElement | null) => void> = [];
 
@@ -237,6 +243,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       blockIdToElement.set(blocks[i].blockId, el);
       elementToBlockId.set(el, blocks[i].blockId);
       applyA11yAttrs(el);
+      setDraftIndicator(el, suspendedDrafts.has(blocks[i].blockId));
     }
     for (const tn of orderedTexts) {
       const list = blockIdToTextNodeIds.get(tn.blockId) ?? [];
@@ -255,6 +262,14 @@ export function setupEditSession(opts: SetupOpts): EditSession {
       el.setAttribute('aria-label', `Editable ${el.tagName.toLowerCase()}`);
     }
     el.dataset.finesseApplied = 'true';
+  }
+
+  function setDraftIndicator(el: HTMLElement, isDirty: boolean): void {
+    if (isDirty) {
+      el.dataset.finesseDirty = 'true';
+    } else {
+      delete el.dataset.finesseDirty;
+    }
   }
 
   function walk(
@@ -357,6 +372,23 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     snapshotTexts = snapshotTextNodes.map((t) => t.data);
     snapshotHTML = block.innerHTML;
     snapshotStructureHTML = htmlWithTextPlaceholders(block);
+    if (activeBlockId !== null) {
+      const draft = suspendedDrafts.get(activeBlockId);
+      if (draft) {
+        setDraftIndicator(block, false);
+        if (
+          draft.structureHTML === snapshotStructureHTML &&
+          draft.textValues &&
+          draft.textValues.length === snapshotTextNodes.length
+        ) {
+          draft.textValues.forEach((text, i) => {
+            snapshotTextNodes[i].data = text;
+          });
+        } else {
+          block.innerHTML = draft.innerHTML;
+        }
+      }
+    }
     block.setAttribute('contenteditable', 'true');
     block.setAttribute('spellcheck', 'true');
     block.focus({ preventScroll: true });
@@ -378,6 +410,10 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     pendingNewTag = null;
     block.removeAttribute('contenteditable');
     block.removeAttribute('spellcheck');
+    if (blockId !== null) {
+      suspendedDrafts.delete(blockId);
+      setDraftIndicator(block, false);
+    }
     if (blockId === null) {
       notifyState({ kind: 'idle' });
       return;
@@ -433,6 +469,47 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     notifyState({ kind: 'idle' });
   }
 
+  function suspendEdit(): void {
+    if (!activeBlock) return;
+    const block = activeBlock;
+    const blockId = activeBlockId;
+    const snapshotNodes = snapshotTextNodes;
+    activeBlock = null;
+    activeBlockId = null;
+    pendingNewTag = null;
+    block.removeAttribute('contenteditable');
+    block.removeAttribute('spellcheck');
+    if (blockId === null) {
+      block.innerHTML = snapshotHTML;
+      notifyState({ kind: 'idle' });
+      return;
+    }
+
+    const currentTexts = collectBlockTexts(block);
+    const structureHTML = htmlWithTextPlaceholders(block);
+    const changed = block.innerHTML !== snapshotHTML || structureHTML !== snapshotStructureHTML;
+    if (changed) {
+      const sameNodes =
+        currentTexts.length === snapshotNodes.length &&
+        currentTexts.every((n, i) => n === snapshotNodes[i]);
+      suspendedDrafts.set(blockId, {
+        innerHTML: block.innerHTML,
+        structureHTML,
+        textValues:
+          sameNodes && structureHTML === snapshotStructureHTML
+            ? currentTexts.map((t) => t.data)
+            : undefined,
+      });
+    } else {
+      suspendedDrafts.delete(blockId);
+    }
+
+    block.innerHTML = snapshotHTML;
+    setDraftIndicator(block, suspendedDrafts.has(blockId));
+    post({ type: 'editCancel', blockId });
+    notifyState({ kind: 'idle' });
+  }
+
   /** Queue a tag rename to fire after the next editAck arrives. */
   let queuedTag: { blockId: number; newTagName: string } | null = null;
   function queueTagAfterAck(blockId: number, newTagName: string): void {
@@ -456,6 +533,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     const blockId = activeBlockId;
     activeBlock = null;
     activeBlockId = null;
+    pendingNewTag = null;
     block.removeAttribute('contenteditable');
     block.removeAttribute('spellcheck');
     block.innerHTML = snapshotHTML;
@@ -495,6 +573,9 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     const elementId = elementToElementId.get(el);
     if (elementId === undefined) return false;
     if (activeBlock) cancelEdit();
+    for (const [block, blockId] of elementToBlockId) {
+      if (el === block || el.contains(block)) suspendedDrafts.delete(blockId);
+    }
     // Optimistically remove from DOM; host responds with editAck + fresh offset map.
     el.remove();
     post({
@@ -821,6 +902,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     findSelectableElement,
     beginEdit,
     commitEdit,
+    suspendEdit,
     cancelEdit,
     removeElement,
     selectElement,
@@ -851,6 +933,18 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     applyStyleEdit,
     applyCssDeclarationEdit,
   };
+}
+
+function installDraftIndicatorStyles(): void {
+  if (document.getElementById('finesse-draft-indicator-style')) return;
+  const style = document.createElement('style');
+  style.id = 'finesse-draft-indicator-style';
+  style.textContent = `
+    [data-finesse-dirty="true"] {
+      box-shadow: inset 3px 0 0 #e2a04a;
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 function snapshotStyles(el: HTMLElement): ElementStyleSnapshot {
