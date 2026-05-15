@@ -121,6 +121,11 @@
           "default": false,
           "description": "Automatically open the preview when an HTML file is opened."
         },
+        "finesse.reactDevServerUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "React dev server URL to proxy for JSX/TSX previews, for example `http://localhost:5173`. The app should use `jsx-loc-plugin` so Finesse can map rendered DOM back to JSX source."
+        },
         "finesse.aiCommand": {
           "type": "string",
           "default": "",
@@ -165,6 +170,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.139",
+    "@babel/parser": "^7.29.3",
     "@cursor/sdk": "^1.0.12",
     "parse5": "^7.1.2",
     "ws": "^8.18.0"

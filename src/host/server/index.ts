@@ -29,6 +29,7 @@ export interface PreviewServerOptions {
   getInjectedPreviewHtml: (workspaceRelativePath: string) => string | null;
   getOffsetMap: (workspaceRelativePath: string) => OffsetMap | null;
   isTemplated: (workspaceRelativePath: string) => boolean;
+  getReactDevServerUrl?: () => string | null;
 }
 
 export { createPreviewServer } from './server';

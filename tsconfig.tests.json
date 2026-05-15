@@ -13,6 +13,7 @@
     "src/host/sanitizeBlockHtml.ts",
     "src/host/blockTagTransform.ts",
     "src/host/computeBlockHtmlSplices.ts",
+    "src/host/computeReactEditSplices.ts",
     "src/iframe/diff.ts",
     "src/iframe/toolbar/formatHelpers.ts",
     "src/iframe/toolbar/positioning.ts",

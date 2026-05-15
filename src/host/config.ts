@@ -8,6 +8,7 @@ export interface ResolvedConfig {
   serverIdleTimeoutMs: number;
   reloadDebounceMs: number;
   openOnHtmlOpen: boolean;
+  reactDevServerUrl: string;
   aiCommand: string;
   agentCursorModel: string;
   agentClaudeModel: string;
@@ -41,6 +42,7 @@ export function readConfig(): ResolvedConfig {
     serverIdleTimeoutMs: cfg.get<number>('serverIdleTimeout', 60000),
     reloadDebounceMs: cfg.get<number>('reloadDebounceMs', 150),
     openOnHtmlOpen: cfg.get<boolean>('openOnHtmlOpen', false),
+    reactDevServerUrl: cfg.get<string>('reactDevServerUrl', ''),
     aiCommand: cfg.get<string>('aiCommand', ''),
     agentCursorModel: cfg.get<string>('agent.cursorModel', 'composer-2'),
     agentClaudeModel: cfg.get<string>('agent.claudeModel', 'claude-opus-4-7'),
@@ -48,10 +50,12 @@ export function readConfig(): ResolvedConfig {
   };
 }
 
-export function onConfigChange(handler: (cfg: ResolvedConfig) => void): vscode.Disposable {
+export function onConfigChange(
+  handler: (cfg: ResolvedConfig, event: vscode.ConfigurationChangeEvent) => void,
+): vscode.Disposable {
   return vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration('finesse')) {
-      handler(readConfig());
+      handler(readConfig(), event);
     }
   });
 }

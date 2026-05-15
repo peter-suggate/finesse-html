@@ -72,11 +72,26 @@ export function activate(context: vscode.ExtensionContext): void {
       if (state.panels.has(doc.uri.toString())) return;
       void vscode.commands.executeCommand('finesse.openPreview');
     }),
-    onConfigChange((cfg) => {
+    onConfigChange((cfg, event) => {
       if (!state) return;
       state.config = cfg;
-      state.watcher?.setDebounce(cfg.reloadDebounceMs);
-      // Re-parse all open panels with new template patterns
+      if (event.affectsConfiguration('finesse.reloadDebounceMs')) {
+        state.watcher?.setDebounce(cfg.reloadDebounceMs);
+      }
+
+      if (event.affectsConfiguration('finesse.agent.provider')) {
+        for (const panel of state.panels.values()) {
+          panel.setAgentProvider(cfg.agentDefaultProvider);
+        }
+      }
+
+      const needsReparse =
+        event.affectsConfiguration('finesse.editableElements') ||
+        event.affectsConfiguration('finesse.templateTokens') ||
+        event.affectsConfiguration('finesse.reactDevServerUrl');
+      if (!needsReparse) return;
+
+      // Re-parse all open panels with source-affecting config changes.
       for (const panel of state.panels.values()) {
         const doc = vscode.workspace.textDocuments.find(
           (d) => d.uri.toString() === panel.documentUri.toString(),
@@ -146,6 +161,7 @@ async function ensureServer(): Promise<PreviewServer> {
       findPanelForPath(workspaceRoot, relPath)?.getOffsetMapForPath(relPath) ?? null,
     isTemplated: (relPath) =>
       findPanelForPath(workspaceRoot, relPath)?.isTemplatedPath(relPath) ?? false,
+    getReactDevServerUrl: () => state?.config.reactDevServerUrl || null,
   });
   await server.start();
   state.server = server;

@@ -6,6 +6,8 @@ export type OffsetMap = {
   type: 'offsetMap';
   /** Workspace-relative path this map describes. Older harnesses may omit it. */
   path?: string;
+  /** Optional render-source metadata. HTML callers can ignore this. */
+  react?: ReactOffsetMetadata;
   documentVersion: number;
   /** Every selectable/removable element in document order. Includes blocks. */
   elements: Array<{
@@ -15,6 +17,8 @@ export type OffsetMap = {
     startOffset: number;
     /** Source offset just past the element's closing `>` (exclusive). */
     endOffset: number;
+    /** Workspace-relative source path for multi-file render modes. */
+    sourcePath?: string;
   }>;
   /** Subset of elements that are text-editing block containers. */
   blocks: Array<{
@@ -26,6 +30,8 @@ export type OffsetMap = {
     innerStartOffset?: number;
     /** Source offset of the closing tag's leading `<`. Inner-content end. */
     innerEndOffset?: number;
+    /** Workspace-relative source path for multi-file render modes. */
+    sourcePath?: string;
   }>;
   textNodes: Array<{
     nodeId: number;
@@ -33,6 +39,52 @@ export type OffsetMap = {
     startOffset: number;
     endOffset: number;
     originalText: string;
+    /** Workspace-relative source path for multi-file render modes. */
+    sourcePath?: string;
+  }>;
+};
+
+export type ReactEditLockReason =
+  | 'dynamic-expression'
+  | 'repeated-source-instance'
+  | 'missing-source-file'
+  | 'unsupported-jsx-attribute'
+  | 'css-source-unavailable';
+
+export type ReactOffsetMetadata = {
+  mode: 'react';
+  lockedElementIds: number[];
+  locks: Array<{
+    elementId: number;
+    reason: ReactEditLockReason;
+  }>;
+  elements: Array<{
+    elementId: number;
+    sourcePath: string;
+    openNameStartOffset: number;
+    openNameEndOffset: number;
+    closeNameStartOffset?: number;
+    closeNameEndOffset?: number;
+    openingEndOffset: number;
+    innerStartOffset?: number;
+    innerEndOffset?: number;
+    attributes: Array<{
+      name: string;
+      startOffset: number;
+      endOffset: number;
+      valueStartOffset?: number;
+      valueEndOffset?: number;
+      kind: 'string' | 'expression' | 'bare';
+    }>;
+  }>;
+  textNodes: Array<{
+    nodeId: number;
+    sourcePath: string;
+  }>;
+  blocks: Array<{
+    blockId: number;
+    sourcePath: string;
+    staticInner: boolean;
   }>;
 };
 
@@ -63,12 +115,21 @@ export type EditFailed = {
   message: string;
 };
 
+export type PreviewDiagnostic = {
+  type: 'previewDiagnostic';
+  path?: string;
+  severity: 'info' | 'warn' | 'error';
+  message: string;
+};
+
 export type FileMeta = {
   type: 'fileMeta';
   /** Workspace-relative path of the file being previewed. */
   path: string;
   /** True iff template syntax was detected anywhere in editable text nodes. */
   isTemplated: boolean;
+  /** How the preview was rendered. Omitted means legacy HTML mode. */
+  renderMode?: 'html' | 'templateLiteral' | 'react';
 };
 
 export type DocumentState = {
@@ -126,6 +187,7 @@ export type HostMessage =
   | EditAck
   | StaleCommit
   | EditFailed
+  | PreviewDiagnostic
   | FileMeta
   | DocumentState
   | AgentSelectionState
@@ -210,6 +272,17 @@ export type RuntimeError = {
   type: 'runtimeError';
   message: string;
   stack?: string;
+};
+
+export type ReactDomDiscovery = DocumentScopedMessage & {
+  type: 'reactDomDiscovery';
+  documentVersion?: number;
+  elements: Array<{
+    elementId: number;
+    loc: string;
+    tagName: string;
+    occurrence: number;
+  }>;
 };
 
 export type Ready = DocumentScopedMessage & {
@@ -348,6 +421,7 @@ export type EditCssDeclaration = DocumentScopedMessage & {
 };
 
 export type IframeMessage =
+  | ReactDomDiscovery
   | EditCommit
   | EditCancel
   | EditRemove

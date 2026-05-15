@@ -71,26 +71,6 @@ export function showStaleReloadBanner(): void {
   container.appendChild(banner);
 }
 
-export function showUnsavedChangesBanner(opts: { onSave: () => void }): void {
-  if (!container) return;
-  if (container.querySelector('[data-kind="unsaved-changes"]')) return;
-  const banner = build({
-    kind: 'warn',
-    dataKind: 'unsaved-changes',
-    text: 'Unsaved changes in this file. Save before closing Finesse or switching tasks.',
-    action: { label: 'Save now', onClick: opts.onSave },
-    dismissible: false,
-  });
-  container.appendChild(banner);
-}
-
-export function dismissUnsavedChangesBanner(): void {
-  if (!container) return;
-  container
-    .querySelectorAll('[data-kind="unsaved-changes"]')
-    .forEach((existing) => existing.remove());
-}
-
 export function showRuntimeErrorBanner(message: string): void {
   if (!container) return;
   const banner = build({
@@ -138,6 +118,22 @@ export function showEditFailedBanner(message: string): void {
     kind: 'warn',
     dataKind: 'edit-failed',
     text: message,
+  });
+  container.appendChild(banner);
+}
+
+export function showPreviewDiagnosticBanner(opts: {
+  severity: 'info' | 'warn' | 'error';
+  message: string;
+}): void {
+  if (!container) return;
+  container
+    .querySelectorAll('[data-kind="preview-diagnostic"]')
+    .forEach((existing) => existing.remove());
+  const banner = build({
+    kind: opts.severity === 'error' ? 'error' : opts.severity === 'warn' ? 'warn' : 'info',
+    dataKind: 'preview-diagnostic',
+    text: opts.message,
   });
   container.appendChild(banner);
 }

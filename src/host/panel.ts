@@ -22,6 +22,7 @@ import type {
   IframeMessage,
   OffsetMap,
   Ready,
+  ReactDomDiscovery,
   RuntimeError,
   WebviewActionMessage,
 } from '../shared/protocol';
@@ -40,18 +41,31 @@ import {
 import type { ResolvedConfig } from './config';
 import { hashText } from './editHistory';
 import { escapeForJsTemplate } from './jsTemplateEscape';
-import { detectTemplate, hasEditAnywayOverride, walkEditable, walkEditableInJs } from './parse';
+import {
+  buildReactOffsetMap,
+  detectTemplate,
+  hasEditAnywayOverride,
+  walkEditable,
+  walkEditableInJs,
+} from './parse';
 import { injectElementIds } from './server/inject';
 
 const JS_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'javascript',
   'typescript',
+]);
+
+const REACT_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'javascriptreact',
   'typescriptreact',
 ]);
 
 function isJsLikeDocument(doc: vscode.TextDocument): boolean {
   return JS_LANGUAGE_IDS.has(doc.languageId);
+}
+
+function isReactDocument(doc: vscode.TextDocument): boolean {
+  return REACT_LANGUAGE_IDS.has(doc.languageId);
 }
 
 export interface PreviewPanel {
@@ -81,12 +95,14 @@ export interface PreviewPanel {
   reveal(): void;
   onDocumentChanged(doc: vscode.TextDocument, kind: 'self' | 'external'): void;
   onDocumentSaved(doc: vscode.TextDocument): void;
+  setAgentProvider(providerId: AgentProviderId): void;
 }
 
 interface PageState {
   uri: vscode.Uri;
   relativePath: string;
   jsMode: boolean;
+  renderMode: NonNullable<FileMeta['renderMode']>;
   escapeReplacement?: ReplacementEscaper;
   currentVersion: number;
   currentOffsetMap: OffsetMap | null;
@@ -203,11 +219,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   let currentAgentSelection: ElementSelectionSnapshot | null = null;
   let agentRunning = false;
   const credentials = new AgentCredentialStore(deps.context);
-  const PROVIDER_STATE_KEY = 'finesse.agent.selectedProvider';
-  const persistedProvider = deps.context.globalState.get<string>(PROVIDER_STATE_KEY);
-  let selectedProvider: AgentProviderId = isAgentProviderId(persistedProvider)
-    ? persistedProvider
-    : deps.getConfig().agentDefaultProvider;
+  let selectedProvider: AgentProviderId = deps.getConfig().agentDefaultProvider;
   const siteHistory = new SiteSnapshotHistory();
   let nextEditTransactionId = 1;
 
@@ -218,10 +230,12 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   function createPageState(uri: vscode.Uri, doc?: vscode.TextDocument): PageState {
     const relPath = relativeWebPath(deps.workspaceRoot, uri.fsPath);
     const jsMode = doc ? isJsLikeDocument(doc) : false;
+    const reactMode = doc ? isReactDocument(doc) : false;
     const page: PageState = {
       uri,
       relativePath: relPath,
       jsMode,
+      renderMode: reactMode ? 'react' : jsMode ? 'templateLiteral' : 'html',
       escapeReplacement: jsMode ? escapeForJsTemplate : undefined,
       currentVersion: doc?.version ?? 1,
       currentOffsetMap: null,
@@ -246,6 +260,16 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       page.currentOffsetMap = result.offsetMap;
       page.currentPreviewHtml = result.composedHtml;
       page.currentInjectedPreviewHtml = injectElementIds(result.composedHtml, result.composedOffsetMap);
+      page.isTemplated = false;
+      page.currentVersion = version;
+      return;
+    }
+    if (page.renderMode === 'react') {
+      page.currentOffsetMap = null;
+      page.currentPreviewHtml = null;
+      page.currentInjectedPreviewHtml = deps.getConfig().reactDevServerUrl
+        ? null
+        : reactSetupPreviewHtml();
       page.isTemplated = false;
       page.currentVersion = version;
       return;
@@ -310,11 +334,16 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   createPageState(document.uri, document);
 
-  const iframeUrl = `http://127.0.0.1:${deps.port}/${encodePath(relativePath)}`;
+  const initialPage = activePage();
+  const iframeUrl =
+    initialPage.renderMode === 'react' && deps.getConfig().reactDevServerUrl
+      ? `http://127.0.0.1:${deps.port}/__react?source=${encodeURIComponent(relativePath)}`
+      : `http://127.0.0.1:${deps.port}/${encodePath(relativePath)}`;
   const fileMeta: FileMeta = {
     type: 'fileMeta',
     path: relativePath,
-    isTemplated: activePage().isTemplated,
+    isTemplated: initialPage.isTemplated,
+    renderMode: initialPage.renderMode,
   };
   panel.webview.html = buildWebviewHtml(panel.webview, deps.context.extensionPath, {
     iframeUrl,
@@ -426,7 +455,12 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       siteHistory.clear();
       currentAgentSelection = null;
       reparsePage(page, doc.getText(), doc.version);
-      const fm: FileMeta = { type: 'fileMeta', path: page.relativePath, isTemplated: page.isTemplated };
+      const fm: FileMeta = {
+        type: 'fileMeta',
+        path: page.relativePath,
+        isTemplated: page.isTemplated,
+        renderMode: page.renderMode,
+      };
       if (page.currentOffsetMap) panel.webview.postMessage(page.currentOffsetMap);
       panel.webview.postMessage(fm);
       panel.webview.postMessage({ type: 'reload', reason: 'discard' });
@@ -482,15 +516,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           await postAgentConnectionState();
         } else if (msg.action === 'selectAgentProvider') {
           if (isAgentProviderId(msg.providerId) && msg.providerId !== selectedProvider) {
-            selectedProvider = msg.providerId;
-            postAgentProviderState();
-            void deps.context.globalState.update(PROVIDER_STATE_KEY, selectedProvider).then(
-              undefined,
-              (err: unknown) => {
-                console.warn('[finesse] failed to persist agent provider:', err);
-              },
-            );
-            await postAgentConnectionState(selectedProvider);
+            await setSelectedAgentProvider(msg.providerId, { persist: true });
           }
         } else if (msg.action === 'runAgent') {
           await handleRunAgentRequest(msg.value, msg.providerId);
@@ -498,6 +524,9 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         return;
       case 'ready':
         sendInitialState(msg);
+        return;
+      case 'reactDomDiscovery':
+        handleReactDomDiscovery(msg);
         return;
       case 'editCommit':
         await handleEditCommit(msg);
@@ -549,11 +578,58 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       type: 'fileMeta',
       path: page.relativePath,
       isTemplated: page.isTemplated,
+      renderMode: page.renderMode,
     } satisfies FileMeta);
+    if (page.renderMode === 'react' && !deps.getConfig().reactDevServerUrl) {
+      postPreviewDiagnostic(
+        page,
+        'error',
+        'React preview is not configured. Set finesse.reactDevServerUrl to your running Vite or Next dev server URL, then reload the preview.',
+      );
+    }
     postDocumentState();
     postAgentSelectionState();
     postAgentProviderState();
     void postAgentConnectionState();
+  }
+
+  function handleReactDomDiscovery(msg: ReactDomDiscovery): void {
+    const page = pageForMessage(msg);
+    if (page.renderMode !== 'react') return;
+    const doc = findOpenDocument(page);
+    const text = doc?.getText() ?? readPageFromDisk(page);
+    if (text === null) return;
+    const version = doc?.version ?? page.currentVersion;
+    const map = buildReactOffsetMap({
+      workspaceRoot: deps.workspaceRoot,
+      previewPath: page.relativePath,
+      activeDocumentPath: page.relativePath,
+      activeDocumentText: text,
+      activeDocumentVersion: version,
+      discoveries: msg.elements,
+      readOpenDocument: (workspaceRelativePath) => {
+        const fsPath = path.resolve(deps.workspaceRoot, workspaceRelativePath);
+        const open = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === fsPath);
+        if (!open) return null;
+        return { text: open.getText(), version: open.version };
+      },
+    });
+    page.currentOffsetMap = map;
+    page.currentVersion = version;
+    panel.webview.postMessage(map);
+    if (map.elements.length === 0) {
+      postPreviewDiagnostic(
+        page,
+        'error',
+        'React preview loaded, but no data-loc attributes were found. Enable jsx-loc-plugin in the app dev server, then reload the preview.',
+      );
+    } else if ((map.react?.lockedElementIds.length ?? 0) > 0) {
+      postPreviewDiagnostic(
+        page,
+        'warn',
+        'React preview loaded. Some rendered elements are locked because they map to repeated, dynamic, or missing JSX source.',
+      );
+    }
   }
 
   function captureSnapshot(activePath = activeRelativePath): SiteSnapshot {
@@ -604,6 +680,19 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     });
   }
 
+  function postPreviewDiagnostic(
+    page: PageState,
+    severity: 'info' | 'warn' | 'error',
+    message: string,
+  ): void {
+    panel.webview.postMessage({
+      type: 'previewDiagnostic',
+      path: page.relativePath,
+      severity,
+      message,
+    });
+  }
+
   async function handleEditCommit(msg: EditCommit): Promise<void> {
     const page = pageForMessage(msg);
     try {
@@ -646,7 +735,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           },
         });
         if (!result.ok) {
-          postStale(page, result.expected, result.actual);
+          if (result.reason === 'stale') postStale(page, result.expected, result.actual);
+          else if (page.currentOffsetMap?.react) {
+            panel.webview.postMessage({
+              type: 'editFailed',
+              path: page.relativePath,
+              message:
+                'That React element cannot be removed safely because the rendered node maps to dynamic or repeated JSX source.',
+            });
+          } else {
+            postStale(page, result.expected, result.actual);
+          }
           return { ok: false };
         }
         return { ok: result.undoEntry.forward.length > 0 };
@@ -674,7 +773,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           escapeReplacement: page.escapeReplacement,
         });
         if (!result.ok) {
-          postStale(page, result.expected, result.actual);
+          if (result.reason === 'stale') postStale(page, result.expected, result.actual);
+          else if (page.currentOffsetMap?.react) {
+            panel.webview.postMessage({
+              type: 'editFailed',
+              path: page.relativePath,
+              message:
+                'That React block edit is locked because the JSX children are dynamic or repeated.',
+            });
+          } else {
+            postStale(page, result.expected, result.actual);
+          }
           return { ok: false };
         }
         return { ok: result.undoEntry.forward.length > 0 };
@@ -701,7 +810,17 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           },
         });
         if (!result.ok) {
-          postStale(page, result.expected, result.actual);
+          if (result.reason === 'stale') postStale(page, result.expected, result.actual);
+          else if (page.currentOffsetMap?.react) {
+            panel.webview.postMessage({
+              type: 'editFailed',
+              path: page.relativePath,
+              message:
+                'That React tag edit is locked because the JSX source is dynamic, repeated, or unsupported.',
+            });
+          } else {
+            postStale(page, result.expected, result.actual);
+          }
           return { ok: false };
         }
         return { ok: result.undoEntry.forward.length > 0 };
@@ -730,6 +849,14 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
         });
         if (!result.ok) {
           if (result.reason === 'stale') postStale(page, result.expected, result.actual);
+          else if (page.currentOffsetMap?.react) {
+            panel.webview.postMessage({
+              type: 'editFailed',
+              path: page.relativePath,
+              message:
+                'That React attribute edit is locked because the JSX source is dynamic, repeated, or not a static string attribute.',
+            });
+          }
           return { ok: false };
         }
         return { ok: result.undoEntry.forward.length > 0 };
@@ -744,6 +871,15 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
 
   async function handleEditCssDeclaration(msg: EditCssDeclaration): Promise<void> {
     const page = pageForMessage(msg);
+    if (page.renderMode === 'react') {
+      panel.webview.postMessage({
+        type: 'editFailed',
+        path: page.relativePath,
+        message:
+          'React CSS rule edits are locked unless Finesse can resolve the source stylesheet. Inline/class edits are still available for static JSX attributes.',
+      });
+      return;
+    }
     try {
       await applySourceEdit(page, 'CSS edit', async (doc) => {
         const result = await applyCssDeclarationCommit({
@@ -881,14 +1017,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     if (agentRunning) return;
     const runProvider = isAgentProviderId(providerId) ? providerId : selectedProvider;
     if (runProvider !== selectedProvider) {
-      selectedProvider = runProvider;
-      postAgentProviderState();
-      void deps.context.globalState.update(PROVIDER_STATE_KEY, selectedProvider).then(
-        undefined,
-        (err: unknown) => {
-          console.warn('[finesse] failed to persist agent provider:', err);
-        },
-      );
+      await setSelectedAgentProvider(runProvider, { persist: true });
     }
     const trimmed = (userPrompt ?? '').trim();
     if (!trimmed) {
@@ -968,6 +1097,23 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     console.warn('[finesse] iframe runtime error:', msg.message, msg.stack);
   }
 
+  async function setSelectedAgentProvider(
+    providerId: AgentProviderId,
+    opts: { persist: boolean },
+  ): Promise<void> {
+    selectedProvider = providerId;
+    postAgentProviderState();
+    await postAgentConnectionState(selectedProvider);
+    if (!opts.persist) return;
+    try {
+      await vscode.workspace
+        .getConfiguration('finesse')
+        .update('agent.provider', selectedProvider, vscode.ConfigurationTarget.Global);
+    } catch (err) {
+      console.warn('[finesse] failed to persist agent provider:', err);
+    }
+  }
+
   return {
     documentUri: document.uri,
     key,
@@ -1042,8 +1188,20 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     onDocumentChanged(doc, kind) {
       const page = trackedPageForUri(doc.uri) ?? createPageState(doc.uri, doc);
       reparsePage(page, doc.getText(), doc.version);
-      const fm: FileMeta = { type: 'fileMeta', path: page.relativePath, isTemplated: page.isTemplated };
+      const fm: FileMeta = {
+        type: 'fileMeta',
+        path: page.relativePath,
+        isTemplated: page.isTemplated,
+        renderMode: page.renderMode,
+      };
       if (kind === 'self') {
+        if (page.renderMode === 'react') {
+          panel.webview.postMessage(fm);
+          panel.webview.postMessage({ type: 'reload', reason: 'stale-commit' });
+          postDocumentState();
+          postAgentSelectionState();
+          return;
+        }
         if (page.currentOffsetMap) {
           panel.webview.postMessage({
             type: 'editAck',
@@ -1068,12 +1226,27 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     onDocumentSaved(_doc) {
       postDocumentState();
     },
+    setAgentProvider(providerId) {
+      if (!isAgentProviderId(providerId) || providerId === selectedProvider) return;
+      void setSelectedAgentProvider(providerId, { persist: false });
+    },
   };
 }
 
 function selectionLabel(selection: ElementSelectionSnapshot): string {
   const text = selection.textPreview ? ` "${selection.textPreview.slice(0, 40)}"` : '';
   return `<${selection.tagName}>${text}`;
+}
+
+function reactSetupPreviewHtml(): string {
+  return `<!doctype html>
+<html>
+  <body>
+    <h1>Configure React preview</h1>
+    <p>Set <code>finesse.reactDevServerUrl</code> to your running Vite or Next dev server URL.</p>
+    <p>Enable <code>jsx-loc-plugin</code> in that app, then reopen the preview.</p>
+  </body>
+</html>`;
 }
 
 async function revertActiveDocument(document: vscode.TextDocument): Promise<void> {

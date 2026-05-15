@@ -55,10 +55,41 @@ function start(): void {
   setupReloadSocket(init.fileMeta.path);
   setupHostMessageListener(session);
   setupGlobalErrorHandlers();
+  if (init.fileMeta.renderMode === 'react') {
+    discoverReactDom(init.fileMeta.path, init.offsetMap?.documentVersion);
+  }
   postToParent({
     type: 'ready',
     path: init.fileMeta.path,
     documentVersion: init.offsetMap?.documentVersion,
+  });
+}
+
+function discoverReactDom(path: string, documentVersion?: number): void {
+  const tagged = Array.from(document.body?.querySelectorAll('[data-loc]') ?? []);
+  const counts = new Map<string, number>();
+  const elements = [];
+  let elementId = 0;
+  for (const node of tagged) {
+    if (!(node instanceof HTMLElement)) continue;
+    const loc = node.getAttribute('data-loc');
+    if (!loc) continue;
+    const occurrence = counts.get(loc) ?? 0;
+    counts.set(loc, occurrence + 1);
+    node.setAttribute('data-finesse-id', String(elementId));
+    elements.push({
+      elementId,
+      loc,
+      tagName: node.tagName.toLowerCase(),
+      occurrence,
+    });
+    elementId++;
+  }
+  postToParent({
+    type: 'reactDomDiscovery',
+    path,
+    documentVersion,
+    elements,
   });
 }
 

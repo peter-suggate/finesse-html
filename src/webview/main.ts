@@ -13,15 +13,14 @@ import { setupSidePanel, type SidePanelController } from './stylePanel';
 import { setupAgentPanel, type AgentPanelController } from './agentPanel';
 import {
   dismissPreviewLoadErrorBanner,
-  dismissUnsavedChangesBanner,
   dismissAll,
   initBanners,
   showEditFailedBanner,
+  showPreviewDiagnosticBanner,
   showPreviewLoadErrorBanner,
   showRuntimeErrorBanner,
   showStaleReloadBanner,
   showTemplatedBanner,
-  showUnsavedChangesBanner,
 } from './banners';
 import { initStatus, updateStatus } from './status';
 
@@ -49,7 +48,6 @@ const init = window.__FINESSE_INIT__;
 
 const banners = document.getElementById('banners');
 if (banners) initBanners(banners);
-let currentDirty = false;
 
 if (!init) {
   showRuntimeErrorBanner('init data missing (window.__FINESSE_INIT__)');
@@ -134,8 +132,18 @@ function bootIframe(init: InitData): void {
     try {
       const res = await fetch(init.iframeUrl, { cache: 'no-store' });
       if (readyReceived) return;
-      if (res.ok) return;
       const body = await res.text().catch(() => '');
+      if (res.ok) {
+        showPreviewLoadErrorBanner({
+          status: res.status,
+          detail:
+            previewProbeDetail(body) ||
+            "The preview HTML loaded, but Finesse's runtime did not report ready. Check for page CSP, an early script error, or a React dev server response that is not app HTML.",
+          iframeUrl: init.iframeUrl,
+          onRetry: loadFrame,
+        });
+        return;
+      }
       showPreviewLoadErrorBanner({
         status: res.status,
         detail: body || res.statusText,
@@ -267,6 +275,12 @@ function bootIframe(init: InitData): void {
       case 'editFailed':
         showEditFailedBanner(data.message);
         break;
+      case 'previewDiagnostic':
+        showPreviewDiagnosticBanner({
+          severity: data.severity,
+          message: data.message,
+        });
+        break;
       case 'fileMeta':
         updateStatus({ file: data.path, locked: data.isTemplated });
         sidePanel?.setLocked(data.isTemplated);
@@ -274,19 +288,16 @@ function bootIframe(init: InitData): void {
           showTemplatedBanner({ onEditAnyway: requestEditAnyway });
         } else {
           dismissAll();
-          syncUnsavedReminder();
         }
         relayToIframe(data);
         break;
       case 'documentState':
-        currentDirty = data.isDirty;
         updateStatus({
           file: data.path,
           isDirty: data.isDirty,
           canUndo: data.canUndo,
           canRedo: data.canRedo,
         });
-        syncUnsavedReminder();
         break;
       case 'agentSelectionState':
         updateStatus({
@@ -336,12 +347,14 @@ function bootIframe(init: InitData): void {
   }
 }
 
-function syncUnsavedReminder(): void {
-  if (currentDirty) {
-    showUnsavedChangesBanner({ onSave: requestSave });
-  } else {
-    dismissUnsavedChangesBanner();
-  }
+function previewProbeDetail(html: string): string {
+  const text = html
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.slice(0, 400);
 }
 
 window.addEventListener(
@@ -380,6 +393,7 @@ function isIframeMessage(data: unknown): data is IframeMessage {
     t === 'editBlockHtml' ||
     t === 'editBlockTag' ||
     t === 'editElementAttrs' ||
+    t === 'reactDomDiscovery' ||
     t === 'editCancel' ||
     t === 'runtimeError' ||
     t === 'ready' ||
@@ -400,6 +414,7 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'reload' ||
     t === 'staleCommit' ||
     t === 'editFailed' ||
+    t === 'previewDiagnostic' ||
     t === 'fileMeta' ||
     t === 'documentState' ||
     t === 'agentSelectionState' ||

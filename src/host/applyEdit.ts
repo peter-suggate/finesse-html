@@ -16,6 +16,12 @@ import { computeBlockHtmlSplices } from './computeBlockHtmlSplices';
 import { computeAttrEditSplices } from './computeAttrEditSplices';
 import { computeCssDeclarationSplice } from './computeCssDeclarationSplice';
 import {
+  computeReactAttrEditSplices,
+  computeReactBlockHtmlSplices,
+  computeReactBlockTagSplices,
+  computeReactRemoveSplices,
+} from './computeReactEditSplices';
+import {
   computeInverseSplices,
   type SpliceOp,
   type UndoEntry,
@@ -272,6 +278,21 @@ export async function applyRemoveCommit(opts: ApplyRemoveOpts): Promise<ApplyEdi
     };
   }
 
+  if (currentOffsetMap.react) {
+    const result = computeReactRemoveSplices({ offsetMap: currentOffsetMap, commit });
+    if (!result.ok) {
+      return {
+        ok: false,
+        reason: 'apply-failed',
+        expected: commit.documentVersion,
+        actual: currentVersion,
+      };
+    }
+    const applied = await applySplicesWithInverse(document, result.splices, opts.beforeApply);
+    if (!applied.ok) return applied;
+    return { ok: true, newVersion: document.version, undoEntry: applied.entry };
+  }
+
   const elementLookup = new Map<number, { startOffset: number; endOffset: number }>();
   for (const el of currentOffsetMap.elements) {
     elementLookup.set(el.elementId, { startOffset: el.startOffset, endOffset: el.endOffset });
@@ -316,6 +337,20 @@ export async function applyBlockHtmlCommit(opts: ApplyBlockHtmlOpts): Promise<Ap
       expected: commit.documentVersion,
       actual: document.version,
     };
+  }
+  if (currentOffsetMap.react) {
+    const result = computeReactBlockHtmlSplices({ offsetMap: currentOffsetMap, commit });
+    if (!result.ok) {
+      return {
+        ok: false,
+        reason: result.reason === 'no-offsets' ? 'no-offsets' : 'apply-failed',
+        expected: commit.documentVersion,
+        actual: currentVersion,
+      };
+    }
+    const applied = await applySplicesWithInverse(document, result.splices, opts.beforeApply);
+    if (!applied.ok) return applied;
+    return { ok: true, newVersion: document.version, undoEntry: applied.entry };
   }
   const result = computeBlockHtmlSplices({
     source: document.getText(),
@@ -372,6 +407,20 @@ export async function applyBlockTagCommit(opts: ApplyBlockTagOpts): Promise<Appl
       actual: document.version,
     };
   }
+  if (currentOffsetMap.react) {
+    const result = computeReactBlockTagSplices({ offsetMap: currentOffsetMap, commit });
+    if (!result.ok) {
+      return {
+        ok: false,
+        reason: result.reason === 'no-offsets' ? 'no-offsets' : 'apply-failed',
+        expected: commit.documentVersion,
+        actual: currentVersion,
+      };
+    }
+    const applied = await applySplicesWithInverse(document, result.splices, opts.beforeApply);
+    if (!applied.ok) return applied;
+    return { ok: true, newVersion: document.version, undoEntry: applied.entry };
+  }
   const block = currentOffsetMap.blocks.find((b) => b.blockId === commit.blockId);
   const element = block ? currentOffsetMap.elements.find((e) => e.elementId === block.elementId) : undefined;
   if (!block || !element) {
@@ -423,6 +472,20 @@ export async function applyAttrEditCommit(opts: ApplyAttrEditOpts): Promise<Appl
       expected: commit.documentVersion,
       actual: document.version,
     };
+  }
+  if (currentOffsetMap.react) {
+    const result = computeReactAttrEditSplices({ offsetMap: currentOffsetMap, commit });
+    if (!result.ok) {
+      return {
+        ok: false,
+        reason: result.reason === 'no-offsets' ? 'no-offsets' : 'apply-failed',
+        expected: commit.documentVersion,
+        actual: currentVersion,
+      };
+    }
+    const applied = await applySplicesWithInverse(document, result.splices, opts.beforeApply);
+    if (!applied.ok) return applied;
+    return { ok: true, newVersion: document.version, undoEntry: applied.entry };
   }
   const element = currentOffsetMap.elements.find((e) => e.elementId === commit.elementId);
   if (!element) {

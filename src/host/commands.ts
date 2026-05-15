@@ -44,7 +44,7 @@ export function registerCommands(
       claudeAgentStatus(context),
     ),
     vscode.commands.registerCommand('finesse.selectAgentProvider', () =>
-      selectAgentProvider(),
+      selectAgentProvider(ctx),
     ),
   );
 }
@@ -76,7 +76,7 @@ async function openPreview(
   const editor = vscode.window.activeTextEditor;
   if (!editor || !PREVIEWABLE_LANGUAGES.has(editor.document.languageId)) {
     void vscode.window.showInformationMessage(
-      'Open an HTML, JS, or TS file to preview.',
+      'Open an HTML, JS, TS, JSX, or TSX file to preview.',
     );
     return;
   }
@@ -207,7 +207,7 @@ async function claudeAgentStatus(context: vscode.ExtensionContext): Promise<void
   await credentials.showStatus('claude-code');
 }
 
-async function selectAgentProvider(): Promise<void> {
+async function selectAgentProvider(ctx: CommandsContext): Promise<void> {
   const items = ALL_AGENT_PROVIDER_IDS.map((id) => ({
     label: id === 'cursor' ? 'Cursor Agent' : 'Claude Code',
     description: id,
@@ -222,5 +222,8 @@ async function selectAgentProvider(): Promise<void> {
   await vscode.workspace
     .getConfiguration('finesse')
     .update('agent.provider', pick.id, vscode.ConfigurationTarget.Global);
+  for (const panel of ctx.listPanels()) {
+    panel.setAgentProvider(pick.id);
+  }
   void vscode.window.showInformationMessage(`Finesse will now use ${pick.label}.`);
 }

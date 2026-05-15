@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as https from 'node:https';
 import * as path from 'node:path';
+import type { Duplex } from 'node:stream';
 import { URL } from 'node:url';
 import type { FileMeta, OffsetMap } from '../../shared/protocol';
 import type { PreviewServer, PreviewServerOptions } from './index';
@@ -86,6 +88,10 @@ class PreviewServerImpl implements PreviewServer {
         this.server = server;
         this.socket = new ReloadSocket();
         this.socket.attach(server);
+        server.on('upgrade', (req, socket, head) => {
+          if ((req.url ?? '').startsWith('/__edit/socket')) return;
+          this.handleUpgrade(req, socket, head);
+        });
         resolve(this.boundPort);
       });
     });
@@ -129,6 +135,11 @@ class PreviewServerImpl implements PreviewServer {
       return;
     }
 
+    if (pathname === '/__react' || pathname.startsWith('/__react/')) {
+      this.proxyReact(pathname, req, res);
+      return;
+    }
+
     const relPath = pathname.replace(/^\/+/, '');
     const resolved = path.resolve(this.opts.workspaceRoot, relPath);
     const within = path.relative(this.opts.workspaceRoot, resolved);
@@ -141,6 +152,10 @@ class PreviewServerImpl implements PreviewServer {
     }
 
     const ext = path.extname(resolved).toLowerCase();
+    if (this.shouldProxyReactRequest(pathname)) {
+      this.proxyReact(pathname, req, res);
+      return;
+    }
     if (ext === '.html' || ext === '.htm') {
       this.serveHtml(relPath, resolved, req, res);
       return;
@@ -153,6 +168,123 @@ class PreviewServerImpl implements PreviewServer {
       }
     }
     this.serveStatic(resolved, ext, req, res);
+  }
+
+  private proxyReact(pathname: string, req: http.IncomingMessage, res: http.ServerResponse): void {
+    const target = this.reactTargetFor(pathname, req.url ?? pathname);
+    if (!target) {
+      res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(reactSetupHtml());
+      return;
+    }
+    const client = target.protocol === 'https:' ? https : http;
+    const headers = { ...req.headers, host: target.host };
+    const proxyReq = client.request(
+      target,
+      { method: req.method, headers },
+      (proxyRes) => {
+        const contentType = String(proxyRes.headers['content-type'] ?? '');
+        if (!contentType.includes('text/html')) {
+          res.writeHead(proxyRes.statusCode ?? 200, proxyResponseHeaders(proxyRes.headers));
+          proxyRes.pipe(res);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        proxyRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+        proxyRes.on('end', () => {
+          const source = Buffer.concat(chunks).toString('utf-8');
+          const sourcePath = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('source') ?? '';
+          const html = injectInstrumentation(source, {
+            offsetMap: null,
+            fileMeta: {
+              type: 'fileMeta',
+              path: sourcePath,
+              isTemplated: false,
+              renderMode: 'react',
+            },
+          });
+          res.writeHead(proxyRes.statusCode ?? 200, {
+            ...proxyResponseHeaders(proxyRes.headers),
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            'content-length': Buffer.byteLength(html),
+          });
+          res.end(html);
+        });
+      },
+    );
+    proxyReq.on('error', (err) => {
+      res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(reactProxyErrorHtml(err instanceof Error ? err.message : String(err)));
+    });
+    req.pipe(proxyReq);
+  }
+
+  private handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+    const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    if (!this.shouldProxyReactRequest(pathname)) {
+      socket.destroy();
+      return;
+    }
+    const target = this.reactTargetFor(pathname, req.url ?? pathname);
+    if (!target) {
+      socket.destroy();
+      return;
+    }
+    const client = target.protocol === 'https:' ? https : http;
+    const proxyReq = client.request(target, {
+      method: req.method,
+      headers: { ...req.headers, host: target.host },
+    });
+    proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+      socket.write(
+        `HTTP/${proxyRes.httpVersion} ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\n` +
+          Object.entries(proxyRes.headers)
+            .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v ?? ''}`)
+            .join('\r\n') +
+          '\r\n\r\n',
+      );
+      if (head.length > 0) proxySocket.write(head);
+      if (proxyHead.length > 0) socket.write(proxyHead);
+      proxySocket.pipe(socket);
+      socket.pipe(proxySocket);
+    });
+    proxyReq.on('error', () => socket.destroy());
+    proxyReq.end();
+  }
+
+  private shouldProxyReactRequest(pathname: string): boolean {
+    if (!this.opts.getReactDevServerUrl?.()) return false;
+    return (
+      pathname === '/__react' ||
+      pathname.startsWith('/__react/') ||
+      pathname.startsWith('/@vite') ||
+      pathname.startsWith('/@react-refresh') ||
+      pathname.startsWith('/src/') ||
+      pathname.startsWith('/node_modules/') ||
+      pathname.startsWith('/__next/') ||
+      pathname.startsWith('/_next/') ||
+      /\.(jsx|tsx|ts|js|mjs|css|map)($|\?)/.test(pathname)
+    );
+  }
+
+  private reactTargetFor(pathname: string, rawUrl: string): URL | null {
+    const configured = this.opts.getReactDevServerUrl?.()?.trim();
+    if (!configured) return null;
+    let base: URL;
+    try {
+      base = new URL(configured);
+    } catch {
+      return null;
+    }
+    const incoming = new URL(rawUrl, 'http://127.0.0.1');
+    if (pathname === '/__react' || pathname.startsWith('/__react/')) {
+      return base;
+    }
+    const target = new URL(base.toString());
+    target.pathname = incoming.pathname;
+    target.search = incoming.search;
+    return target;
   }
 
   private serveRuntime(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -218,6 +350,7 @@ class PreviewServerImpl implements PreviewServer {
       type: 'fileMeta',
       path: relPath,
       isTemplated: this.opts.isTemplated(relPath),
+      renderMode: reactSourceExt(relPath) ? 'react' : undefined,
     };
     const html = injectInstrumentation(htmlWithIds, { offsetMap, fileMeta });
     const etag = `W/"html-${offsetMap?.documentVersion ?? 0}-${html.length}"`;
@@ -256,6 +389,42 @@ class PreviewServerImpl implements PreviewServer {
       res.end('Not found');
     }
   }
+}
+
+function proxyResponseHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = { ...headers };
+  delete out['content-length'];
+  delete out['content-security-policy'];
+  delete out['x-frame-options'];
+  return out;
+}
+
+function reactSetupHtml(): string {
+  return `<!doctype html>
+<html>
+  <body>
+    <h1>Configure React preview</h1>
+    <p>Set <code>finesse.reactDevServerUrl</code> to your running Vite or Next dev server URL.</p>
+    <p>Install and enable <code>jsx-loc-plugin</code> in that app so Finesse can map DOM nodes to JSX source.</p>
+  </body>
+</html>`;
+}
+
+function reactProxyErrorHtml(message: string): string {
+  const escaped = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<!doctype html>
+<html>
+  <body>
+    <h1>React preview unavailable</h1>
+    <p>Finesse could not reach the configured React dev server.</p>
+    <pre>${escaped}</pre>
+  </body>
+</html>`;
+}
+
+function reactSourceExt(relPath: string): boolean {
+  const ext = path.extname(relPath).toLowerCase();
+  return ext === '.jsx' || ext === '.tsx';
 }
 
 export function createPreviewServer(opts: PreviewServerOptions): PreviewServer {

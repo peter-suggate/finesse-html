@@ -22,7 +22,7 @@ export class FileWatcher implements vscode.Disposable {
   constructor(deps: FileWatcherDeps) {
     this.deps = deps;
     this.htmlWatcher = vscode.workspace.createFileSystemWatcher('**/*.{html,htm}');
-    this.assetWatcher = vscode.workspace.createFileSystemWatcher('**/*.{css,js,mjs,svg,png,jpg,jpeg,gif,webp,woff,woff2,ttf,otf}');
+    this.assetWatcher = vscode.workspace.createFileSystemWatcher('**/*.{css,js,mjs,jsx,ts,tsx,svg,png,jpg,jpeg,gif,webp,woff,woff2,ttf,otf}');
     const onHtml = (uri: vscode.Uri): void => this.queueHtml(uri);
     const onAsset = (uri: vscode.Uri): void => this.queueAsset(uri);
     this.disposables.push(

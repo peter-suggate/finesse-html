@@ -3,6 +3,8 @@ export { walkEditable, hasEditAnywayOverride } from './walkEditable';
 export type { WalkOptions } from './walkEditable';
 export { walkEditableInJs } from './walkEditableInJs';
 export type { JsWalkResult, WalkJsOptions } from './walkEditableInJs';
+export { buildReactOffsetMap } from './reactJsx';
+export type { BuildReactOffsetMapOptions } from './reactJsx';
 export {
   composeTemplateLiterals,
   composedToSource,
