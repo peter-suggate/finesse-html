@@ -37,6 +37,8 @@ Or via the UI: Extensions panel → `⋯` (More Actions) → **Install from VSIX
 
 You can also tab between editable blocks (`Tab` / `Shift+Tab`) and press `Enter` to begin editing the focused block.
 
+For a running React/Next app, run the app dev server and use `Cmd+Shift+P` → **Finesse: Open Dev Server Preview**. The command defaults to `http://localhost:3000`, saves the URL to `finesse.reactDevServerUrl`, and opens the dev-server page directly.
+
 ---
 
 ## What it edits
@@ -70,6 +72,7 @@ Add `data-no-edit` to any element (or `contenteditable="false"`) and Finesse ign
 | `finesse.serverIdleTimeout` | `60000` ms | Time after the last preview closes before the HTTP server shuts down. |
 | `finesse.reloadDebounceMs` | `150` ms | Debounce window for external-file-change reloads. |
 | `finesse.openOnHtmlOpen` | `false` | Auto-open the preview whenever an HTML file opens. |
+| `finesse.reactDevServerUrl` | `""` | Existing React/Next dev server URL to proxy for JSX/TSX previews. For Next, use the exact page URL, including path/query if needed. |
 | `finesse.editableElements` | `[]` | Reserved for v2: override the block-container tag list. |
 | `finesse.aiCommand` | `""` | Reserved for v2 (Phase 3A): command id to invoke for "Rewrite with AI". |
 

@@ -157,6 +157,8 @@ export type AgentProviderState = {
   type: 'agentProviderState';
   /** Which provider is currently active for the Ask Agent panel. */
   providerId: AgentProviderId;
+  /** Model id the active provider will use for the next run. */
+  model?: string;
 };
 
 export type AgentConnectionState = {
@@ -270,8 +272,12 @@ export type EditElementAttrs = DocumentScopedMessage & {
 
 export type RuntimeError = {
   type: 'runtimeError';
+  source?: 'finesse' | 'page';
   message: string;
   stack?: string;
+  filename?: string;
+  lineno?: number;
+  colno?: number;
 };
 
 export type ReactDomDiscovery = DocumentScopedMessage & {
@@ -499,4 +505,5 @@ export type WebviewActionMessage =
   | { type: '__webview_action'; action: 'saveApiKey'; value: string }
   | { type: '__webview_action'; action: 'forgetApiKey' }
   | { type: '__webview_action'; action: 'selectAgentProvider'; providerId: AgentProviderId }
+  | { type: '__webview_action'; action: 'changeAgentModel' }
   | { type: '__webview_action'; action: 'runAgent'; value: string; providerId: AgentProviderId };

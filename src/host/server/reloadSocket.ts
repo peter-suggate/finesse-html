@@ -11,7 +11,13 @@ export class ReloadSocket {
   private readonly subs = new Set<SubInfo>();
 
   attach(server: http.Server): void {
-    this.wss = new WebSocketServer({ server, path: '/__edit/socket' });
+    this.wss = new WebSocketServer({ noServer: true });
+    server.on('upgrade', (req, socket, head) => {
+      if (!(req.url ?? '').startsWith('/__edit/socket')) return;
+      this.wss?.handleUpgrade(req, socket, head, (ws) => {
+        this.wss?.emit('connection', ws, req);
+      });
+    });
     this.wss.on('connection', (socket) => {
       const info: SubInfo = { socket, path: null };
       this.subs.add(info);

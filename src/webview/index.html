@@ -27,6 +27,17 @@
         background: var(--vscode-statusBar-background);
         color: var(--vscode-statusBar-foreground);
         border-bottom: 1px solid var(--vscode-panel-border);
+        box-shadow: inset 3px 0 0 transparent;
+        transition:
+          background-color 160ms ease-out,
+          color 160ms ease-out,
+          box-shadow 160ms ease-out;
+      }
+      #status.is-dirty {
+        background: var(--vscode-inputValidation-warningBackground, #4a3a1a);
+        color: var(--vscode-inputValidation-warningForeground, #f0c674);
+        box-shadow: inset 3px 0 0
+          var(--vscode-inputValidation-warningBorder, #e2a04a);
       }
       #status .muted {
         opacity: 0.7;
@@ -48,8 +59,7 @@
         font-weight: 600;
         opacity: 0.72;
       }
-      #status .save-state.is-dirty {
-        color: var(--vscode-inputValidation-warningForeground, #f0c674);
+      #status.is-dirty .save-state {
         opacity: 1;
       }
       #status button.tool {

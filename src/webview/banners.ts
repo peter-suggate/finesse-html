@@ -71,14 +71,47 @@ export function showStaleReloadBanner(): void {
   container.appendChild(banner);
 }
 
-export function showRuntimeErrorBanner(message: string): void {
+export function showRuntimeErrorBanner(input: string | {
+  source?: 'finesse' | 'page';
+  message: string;
+  stack?: string;
+  filename?: string;
+  lineno?: number;
+  colno?: number;
+}): void {
   if (!container) return;
+  const details = typeof input === 'string' ? { message: input } : input;
+  const source = details.source === 'page' ? 'Page script error' : 'Finesse runtime error';
+  const location =
+    details.filename && details.lineno
+      ? ` (${details.filename}:${details.lineno}${details.colno ? `:${details.colno}` : ''})`
+      : '';
+  const stackLine = details.stack?.split('\n').find((line) => line.trim().length > 0);
+  const stackText = stackLine && stackLine !== details.message ? ` — ${stackLine.trim()}` : '';
+  const text = `${source}: ${details.message}${location}${stackText}`.slice(0, 1000);
+  container
+    .querySelectorAll(`[data-kind="runtime-error"][data-error-key="${cssEscape(errorKey(text))}"]`)
+    .forEach((existing) => existing.remove());
   const banner = build({
     kind: 'error',
     dataKind: 'runtime-error',
-    text: `Runtime error: ${message}`,
+    text,
   });
+  banner.dataset.errorKey = errorKey(text);
   container.appendChild(banner);
+}
+
+function errorKey(value: string): string {
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    out += code.toString(36);
+  }
+  return out.slice(0, 120);
+}
+
+function cssEscape(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
 }
 
 export function showPreviewLoadErrorBanner(opts: {

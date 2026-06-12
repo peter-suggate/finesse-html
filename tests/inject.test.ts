@@ -93,6 +93,9 @@ describe('injectInstrumentation', () => {
     const out = injectInstrumentation(html, { offsetMap: null, fileMeta: FILE_META });
     const bodyIdx = out.indexOf('</body>');
     const runtimeIdx = out.indexOf('/__edit/runtime.js');
+    const errorBridgeIdx = out.indexOf("type: 'runtimeError'");
+    expect(errorBridgeIdx).toBeGreaterThan(0);
+    expect(errorBridgeIdx).toBeLessThan(runtimeIdx);
     expect(runtimeIdx).toBeGreaterThan(0);
     expect(runtimeIdx).toBeLessThan(bodyIdx);
   });

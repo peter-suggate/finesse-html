@@ -10,7 +10,6 @@ import { ALLOWED_BLOCK_TAGS } from './blockTagTransform';
 import type { SpliceOp } from './undoStack';
 
 type ReactMeta = NonNullable<OffsetMap['react']>;
-type ReactElementMeta = ReactMeta['elements'][number];
 
 export type ReactSpliceResult =
   | { ok: true; splices: SpliceOp[] }

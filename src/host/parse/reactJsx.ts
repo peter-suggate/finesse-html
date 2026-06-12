@@ -4,6 +4,8 @@ import { parse } from '@babel/parser';
 import type { OffsetMap, ReactDomDiscovery, ReactEditLockReason } from '../../shared/protocol';
 import { BLOCK_TAGS } from './editabilityRules';
 
+// Babel parser nodes are intentionally dynamic here; this module validates fields before using them.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyNode = Record<string, any>;
 
 const SKIP_ELEMENTS: ReadonlySet<string> = new Set([

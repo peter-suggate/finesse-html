@@ -3,7 +3,11 @@ import * as vscode from 'vscode';
 import { AgentCredentialStore } from './agent/credentials';
 import { ALL_AGENT_PROVIDER_IDS, isAgentProviderId } from './agent/types';
 import type { ResolvedConfig } from './config';
-import { createPreviewPanel, type PreviewPanel } from './panel';
+import {
+  createDevServerPreviewPanel,
+  createPreviewPanel,
+  type PreviewPanel,
+} from './panel';
 import type { PreviewServer } from './server';
 
 export interface CommandsContext {
@@ -13,6 +17,7 @@ export interface CommandsContext {
   listPanels(): PreviewPanel[];
   ensureServer(): Promise<PreviewServer>;
   getConfig(): ResolvedConfig;
+  setReactDevServerUrl(url: string): void;
 }
 
 export function registerCommands(
@@ -22,6 +27,9 @@ export function registerCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand('finesse.openPreview', () =>
       openPreview(context, ctx),
+    ),
+    vscode.commands.registerCommand('finesse.openDevServerPreview', () =>
+      openDevServerPreview(context, ctx),
     ),
     vscode.commands.registerCommand('finesse.closePreview', () => closePreview(ctx)),
     vscode.commands.registerCommand('finesse.editAnyway', () => editAnyway()),
@@ -56,6 +64,8 @@ const PREVIEWABLE_LANGUAGES: ReadonlySet<string> = new Set([
   'javascriptreact',
   'typescriptreact',
 ]);
+
+const DEFAULT_DEV_SERVER_URL = 'http://localhost:3000';
 
 export function isPreviewableLanguage(languageId: string): boolean {
   return PREVIEWABLE_LANGUAGES.has(languageId);
@@ -134,6 +144,77 @@ async function openPreview(
     onDispose: () => ctx.deletePanel(key),
   });
   ctx.setPanel(key, panel);
+}
+
+async function openDevServerPreview(
+  extContext: vscode.ExtensionContext,
+  ctx: CommandsContext,
+): Promise<void> {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceRoot) {
+    void vscode.window.showErrorMessage(
+      'Finesse needs an open workspace folder to map dev-server DOM nodes back to source files.',
+    );
+    return;
+  }
+
+  const configured = ctx.getConfig().reactDevServerUrl.trim();
+  const raw = await vscode.window.showInputBox({
+    title: 'Finesse: Open Dev Server Preview',
+    prompt: 'Enter the running React/Next dev server page URL.',
+    value: configured || DEFAULT_DEV_SERVER_URL,
+    placeHolder: DEFAULT_DEV_SERVER_URL,
+    validateInput: (value) =>
+      normalizeDevServerUrl(value) ? null : 'Enter a valid http:// or https:// URL.',
+  });
+  if (raw === undefined) return;
+  const url = normalizeDevServerUrl(raw);
+  if (!url) {
+    void vscode.window.showErrorMessage('Enter a valid http:// or https:// dev server URL.');
+    return;
+  }
+
+  await vscode.workspace
+    .getConfiguration('finesse')
+    .update('reactDevServerUrl', url, vscode.ConfigurationTarget.Workspace);
+  ctx.setReactDevServerUrl(url);
+
+  const server = await ctx.ensureServer();
+  const port = server.port;
+  if (port === null) {
+    void vscode.window.showErrorMessage('Preview server failed to start.');
+    return;
+  }
+
+  const key = `finesse-dev-server:${url}`;
+  const existing = ctx.getPanel(key);
+  if (existing) {
+    existing.reveal();
+    return;
+  }
+  const panel = createDevServerPreviewPanel({
+    context: extContext,
+    port,
+    workspaceRoot,
+    getConfig: ctx.getConfig,
+    onDispose: () => ctx.deletePanel(key),
+  });
+  ctx.setPanel(key, panel);
+}
+
+function normalizeDevServerUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : `http://${trimmed}`;
+  try {
+    const url = new URL(withProtocol);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function closePreview(ctx: CommandsContext): void {

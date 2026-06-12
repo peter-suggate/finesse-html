@@ -18,6 +18,7 @@ export interface StatusActions {
 }
 
 let state: StatusState = {};
+let elRoot: HTMLElement | null = null;
 let elFile: HTMLElement | null = null;
 let elVersion: HTMLElement | null = null;
 let elPort: HTMLElement | null = null;
@@ -31,6 +32,7 @@ let elSelection: HTMLElement | null = null;
 let elSaveState: HTMLElement | null = null;
 
 export function initStatus(initial: StatusState, actions?: StatusActions): void {
+  elRoot = document.getElementById('status');
   elFile = document.getElementById('status-file');
   elVersion = document.getElementById('status-version');
   elPort = document.getElementById('status-port');
@@ -57,10 +59,10 @@ export function updateStatus(patch: StatusState): void {
   if (elVersion && state.version !== undefined) elVersion.textContent = `v${state.version}`;
   if (elPort && state.port !== undefined) elPort.textContent = `:${state.port}`;
   if (elLocked) elLocked.hidden = !state.locked;
+  if (elRoot) elRoot.classList.toggle('is-dirty', !!state.isDirty);
   if (elDirty) elDirty.classList.toggle('is-dirty', !!state.isDirty);
   if (elSaveState) {
     elSaveState.textContent = state.isDirty ? 'Unsaved changes' : 'Saved';
-    elSaveState.classList.toggle('is-dirty', !!state.isDirty);
   }
   if (elSave) {
     elSave.disabled = !state.isDirty;

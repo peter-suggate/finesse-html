@@ -44,6 +44,10 @@ export function activate(context: vscode.ExtensionContext): void {
     listPanels: () => Array.from(state?.panels.values() ?? []),
     ensureServer,
     getConfig: () => state?.config ?? readConfig(),
+    setReactDevServerUrl: (url) => {
+      if (!state) return;
+      state.config = { ...state.config, reactDevServerUrl: url };
+    },
   });
 
   context.subscriptions.push(
@@ -82,6 +86,15 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration('finesse.agent.provider')) {
         for (const panel of state.panels.values()) {
           panel.setAgentProvider(cfg.agentDefaultProvider);
+        }
+      }
+
+      if (
+        event.affectsConfiguration('finesse.agent.claudeModel') ||
+        event.affectsConfiguration('finesse.agent.cursorModel')
+      ) {
+        for (const panel of state.panels.values()) {
+          panel.refreshAgentModel();
         }
       }
 

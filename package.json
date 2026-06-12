@@ -23,6 +23,7 @@
     "onLanguage:javascriptreact",
     "onLanguage:typescriptreact",
     "onCommand:finesse.openPreview",
+    "onCommand:finesse.openDevServerPreview",
     "onCommand:finesse.connectCursorAgent",
     "onCommand:finesse.disconnectCursorAgent",
     "onCommand:finesse.cursorAgentStatus",
@@ -36,6 +37,10 @@
       {
         "command": "finesse.openPreview",
         "title": "Finesse: Open Preview"
+      },
+      {
+        "command": "finesse.openDevServerPreview",
+        "title": "Finesse: Open Dev Server Preview"
       },
       {
         "command": "finesse.closePreview",
@@ -124,7 +129,7 @@
         "finesse.reactDevServerUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "React dev server URL to proxy for JSX/TSX previews, for example `http://localhost:5173`. The app should use `jsx-loc-plugin` so Finesse can map rendered DOM back to JSX source."
+          "markdownDescription": "React or Next dev server URL to proxy for JSX/TSX previews, for example `http://localhost:5173` or `http://localhost:3000/dashboard`. Use the exact page URL for Next apps, and enable `jsx-loc-plugin` so Finesse can map rendered DOM back to JSX source."
         },
         "finesse.aiCommand": {
           "type": "string",
@@ -138,8 +143,8 @@
         },
         "finesse.agent.claudeModel": {
           "type": "string",
-          "default": "claude-opus-4-7",
-          "description": "Claude model id (e.g. claude-opus-4-7, claude-sonnet-4-6, or alias 'opus'/'sonnet'/'haiku') used by the Claude Code agent provider."
+          "default": "claude-opus-4-8",
+          "description": "Claude model id (e.g. claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5, claude-fable-5, or alias 'opus'/'sonnet'/'haiku') used by the Claude Code agent provider. Also changeable from the Ask Agent panel's ⋯ menu."
         },
         "finesse.agent.provider": {
           "type": "string",

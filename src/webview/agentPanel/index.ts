@@ -1,12 +1,18 @@
 /**
  * Inline Ask Agent panel — pinned to the bottom of the side dock.
  *
- * Header: provider toggle (Cursor / Claude Code).
- * Body modes:
- *   - `connect` — provider needs a credential we don't yet have. Inline key
- *     input (Cursor) or subscription-login hint (Claude Code).
- *   - `prompt`  — connected and an element is selected; show prompt textarea.
- *   - `run`     — agent run in flight, finished, or errored; show streaming log.
+ * Composer-first layout: the prompt input is the visual anchor. Last run stays
+ * visible as a turn above the composer rather than swapping the panel into a
+ * separate "run" mode. Provider switching, disconnect, and conversation reset
+ * live behind a single overflow menu so the resting state stays uncluttered.
+ *
+ * States the panel handles:
+ *   - disconnected: provider needs a credential we don't yet have.
+ *     Shows two provider buttons and an inline key input (collapsed by default).
+ *   - idle: connected, no run in flight. Just composer + target chip.
+ *   - running / done / error: composer stays present below a turn block
+ *     showing the prompt, status, streaming output, and inline actions
+ *     (retry on error, dismiss on done).
  *
  * Themed with VS Code CSS variables to match the surrounding chrome.
  */
@@ -18,6 +24,8 @@ export interface AgentPanelState {
   providerId: AgentProviderId;
   connected: boolean;
   connectionSource?: AgentConnectionSource;
+  /** Model id the active provider will use for the next run. */
+  model?: string;
   selectedLabel?: string;
   agentRunning: boolean;
   /** Tail of streamed status + output lines from the current/last run. */
@@ -32,6 +40,7 @@ export interface AgentPanelActions {
   onSaveApiKey: (value: string) => void;
   onForgetApiKey: () => void;
   onSelectProvider: (providerId: AgentProviderId) => void;
+  onChangeModel: () => void;
   onRunAgent: (prompt: string) => void;
 }
 
@@ -55,8 +64,6 @@ interface ProviderMeta {
   label: string;
   shortLabel: string;
   keyPlaceholder: string;
-  connectHint: string;
-  subscriptionHint?: string;
   dashboardLabel: string;
 }
 
@@ -66,18 +73,14 @@ const PROVIDERS: Record<AgentProviderId, ProviderMeta> = {
     label: 'Cursor Agent',
     shortLabel: 'Cursor',
     keyPlaceholder: 'crsr_… paste API key',
-    connectHint: 'Connect Cursor to ask the agent to edit the selected element.',
-    dashboardLabel: 'Open Cursor Dashboard',
+    dashboardLabel: 'Cursor Dashboard',
   },
   'claude-code': {
     id: 'claude-code',
     label: 'Claude Code',
     shortLabel: 'Claude',
     keyPlaceholder: 'sk-ant-… paste API key (optional)',
-    connectHint:
-      'Claude Code uses your existing Claude CLI login. Run `claude` then `/login` in a terminal — or paste an ANTHROPIC_API_KEY below.',
-    subscriptionHint: 'Subscription auth: run `claude` then `/login` in any terminal.',
-    dashboardLabel: 'Open Claude Code Docs',
+    dashboardLabel: 'Claude Code Docs',
   },
 };
 
@@ -88,25 +91,18 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   root.className = 'ap-root';
   root.setAttribute('aria-label', 'Ask Agent');
 
-  const header = document.createElement('div');
-  header.className = 'ap-header';
-  const title = document.createElement('span');
-  title.className = 'ap-title';
-  title.textContent = 'Ask Agent';
-  const providerToggle = document.createElement('div');
-  providerToggle.className = 'ap-provider-toggle';
-  providerToggle.setAttribute('role', 'tablist');
-  providerToggle.setAttribute('aria-label', 'Agent provider');
-  const status = document.createElement('span');
-  status.className = 'ap-status';
-  header.appendChild(title);
-  header.appendChild(providerToggle);
-  header.appendChild(status);
-  root.appendChild(header);
+  // The conversation area shows the last submitted prompt and the agent's
+  // streamed output as stacked turns. It scrolls; the composer stays pinned.
+  const conversation = document.createElement('div');
+  conversation.className = 'ap-conversation';
+  root.appendChild(conversation);
 
-  const body = document.createElement('div');
-  body.className = 'ap-body';
-  root.appendChild(body);
+  // The composer block. Rendered in two shapes depending on connection:
+  //   - connect card (provider buttons + key input)
+  //   - composer (target chip + textarea + send + bottom rail)
+  const dock = document.createElement('div');
+  dock.className = 'ap-dock';
+  root.appendChild(dock);
 
   let state: AgentPanelState = {
     providerId: 'cursor',
@@ -116,223 +112,482 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   };
   let pendingPrompt = '';
   let pendingKey = '';
+  // The user's most-recently-submitted prompt. Survives across runs so the
+  // turn block can re-render it without us having to plumb it through state.
+  let lastSubmittedPrompt = '';
+  let showKeyInput = false;
+  let menuOpen = false;
 
   function provider(): ProviderMeta {
     return PROVIDERS[state.providerId];
   }
 
   function render(): void {
-    renderProviderToggle();
-    body.innerHTML = '';
-    if (state.agentRunning || state.runLog || state.runError) {
-      renderRun();
-      status.textContent = state.agentRunning ? 'running' : state.runError ? 'error' : 'done';
-    } else if (!state.connected) {
-      renderConnect();
-      status.textContent = 'not connected';
-    } else {
-      renderPrompt();
-      status.textContent = describeConnectionStatus();
-    }
+    renderConversation();
+    renderDock();
+    syncRootDataAttrs();
   }
 
-  function describeConnectionStatus(): string {
-    if (state.providerId === 'claude-code') {
-      if (state.connectionSource === 'environment') return 'connected · env';
-      if (state.connectionSource === 'secret') return 'connected · key';
-      return 'connected · subscription';
-    }
-    return state.connectionSource === 'environment' ? 'connected · env' : 'connected';
+  function syncRootDataAttrs(): void {
+    root.dataset.connected = state.connected ? 'true' : 'false';
+    root.dataset.running = state.agentRunning ? 'true' : 'false';
+    root.dataset.hasTurn = lastSubmittedPrompt || state.runError ? 'true' : 'false';
   }
 
-  function renderProviderToggle(): void {
-    providerToggle.innerHTML = '';
-    for (const id of Object.keys(PROVIDERS) as AgentProviderId[]) {
-      const meta = PROVIDERS[id];
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'ap-provider-pill' + (state.providerId === id ? ' is-active' : '');
-      btn.textContent = meta.shortLabel;
-      btn.title = meta.label;
-      btn.disabled = state.agentRunning;
-      btn.setAttribute('role', 'tab');
-      btn.setAttribute('aria-selected', state.providerId === id ? 'true' : 'false');
-      btn.addEventListener('click', () => {
-        if (state.agentRunning) return;
-        if (state.providerId === id) return;
-        opts.actions.onSelectProvider(id);
-      });
-      providerToggle.appendChild(btn);
+  function renderConversation(): void {
+    conversation.innerHTML = '';
+    const hasTurn = Boolean(lastSubmittedPrompt) || Boolean(state.runError);
+    if (!hasTurn) {
+      conversation.style.display = 'none';
+      return;
     }
+    conversation.style.display = '';
+
+    if (lastSubmittedPrompt) {
+      const userTurn = renderUserTurn(lastSubmittedPrompt, state.selectedLabel);
+      conversation.appendChild(userTurn);
+    }
+
+    const agentTurn = renderAgentTurn();
+    if (agentTurn) conversation.appendChild(agentTurn);
   }
 
-  function renderConnect(): void {
-    const meta = provider();
-    const hint = document.createElement('p');
-    hint.className = 'ap-hint';
-    hint.textContent = meta.connectHint;
-    body.appendChild(hint);
-
-    const dashRow = document.createElement('div');
-    dashRow.className = 'ap-row';
-    const dashBtn = document.createElement('button');
-    dashBtn.type = 'button';
-    dashBtn.className = 'ap-btn-ghost';
-    dashBtn.textContent = meta.dashboardLabel;
-    dashBtn.addEventListener('click', () => {
-      if (meta.id === 'cursor') opts.actions.onOpenDashboard();
-      else opts.actions.onOpenClaudeDocs();
-    });
-    dashRow.appendChild(dashBtn);
-    body.appendChild(dashRow);
-
-    const inputRow = document.createElement('div');
-    inputRow.className = 'ap-row ap-key-row';
-    const input = document.createElement('input');
-    input.type = 'password';
-    input.placeholder = meta.keyPlaceholder;
-    input.className = 'ap-input';
-    input.spellcheck = false;
-    input.autocomplete = 'off';
-    input.value = pendingKey;
-    input.addEventListener('input', () => {
-      pendingKey = input.value;
-      connectBtn.disabled = input.value.trim().length === 0;
-    });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && input.value.trim().length > 0) {
-        e.preventDefault();
-        submitKey();
-      }
-    });
-    const connectBtn = document.createElement('button');
-    connectBtn.type = 'button';
-    connectBtn.className = 'ap-btn-primary';
-    connectBtn.textContent = 'Connect';
-    connectBtn.disabled = input.value.trim().length === 0;
-    connectBtn.addEventListener('click', submitKey);
-    inputRow.appendChild(input);
-    inputRow.appendChild(connectBtn);
-    body.appendChild(inputRow);
-
-    const sub = document.createElement('p');
-    sub.className = 'ap-subhint';
-    sub.textContent = meta.subscriptionHint ?? 'Stored in extension secrets, not in this workspace.';
-    body.appendChild(sub);
-
-    function submitKey(): void {
-      const value = input.value.trim();
-      if (!value) return;
-      pendingKey = '';
-      opts.actions.onSaveApiKey(value);
-    }
-  }
-
-  function renderPrompt(): void {
+  function renderUserTurn(prompt: string, target?: string): HTMLElement {
+    const turn = document.createElement('div');
+    turn.className = 'ap-turn ap-turn-user';
     const meta = document.createElement('div');
-    meta.className = 'ap-meta';
-    const target = state.selectedLabel ?? 'no element selected';
-    meta.textContent = `Target: ${target}`;
-    body.appendChild(meta);
-
-    if (!state.selectedLabel) {
-      const empty = document.createElement('p');
-      empty.className = 'ap-hint';
-      empty.textContent = 'No element selected. Your prompt will apply to the current page.';
-      body.appendChild(empty);
+    meta.className = 'ap-turn-meta';
+    const role = document.createElement('span');
+    role.className = 'ap-turn-role';
+    role.textContent = 'You';
+    meta.appendChild(role);
+    if (target) {
+      const chip = document.createElement('span');
+      chip.className = 'ap-turn-target';
+      chip.textContent = target;
+      chip.title = `Target: ${target}`;
+      meta.appendChild(chip);
     }
-
-    const textarea = document.createElement('textarea');
-    textarea.className = 'ap-textarea';
-    textarea.rows = 3;
-    textarea.placeholder = state.selectedLabel
-      ? 'e.g. Make this button more prominent and add a chevron icon.'
-      : 'e.g. Improve the visual hierarchy and make the page feel more polished.';
-    textarea.value = pendingPrompt;
-    textarea.addEventListener('input', () => {
-      pendingPrompt = textarea.value;
-      sendBtn.disabled = textarea.value.trim().length === 0;
-    });
-    textarea.addEventListener('keydown', (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        submitPrompt();
-      }
-    });
-    body.appendChild(textarea);
-
-    const footer = document.createElement('div');
-    footer.className = 'ap-footer';
-    const note = document.createElement('span');
-    note.className = 'ap-subhint';
-    note.textContent = '⌘↩ to send';
-    const forget = document.createElement('button');
-    forget.type = 'button';
-    forget.className = 'ap-link';
-    forget.textContent = state.providerId === 'claude-code' ? 'Forget API key' : 'Disconnect';
-    forget.addEventListener('click', () => opts.actions.onForgetApiKey());
-    const sendBtn = document.createElement('button');
-    sendBtn.type = 'button';
-    sendBtn.className = 'ap-btn-primary';
-    sendBtn.textContent = 'Send';
-    sendBtn.disabled = textarea.value.trim().length === 0;
-    sendBtn.addEventListener('click', submitPrompt);
-    footer.appendChild(note);
-    footer.appendChild(forget);
-    footer.appendChild(sendBtn);
-    body.appendChild(footer);
-
-    function submitPrompt(): void {
-      const value = textarea.value.trim();
-      if (!value) return;
-      pendingPrompt = '';
-      opts.actions.onRunAgent(value);
-    }
+    turn.appendChild(meta);
+    const body = document.createElement('div');
+    body.className = 'ap-turn-body';
+    body.textContent = prompt;
+    turn.appendChild(body);
+    return turn;
   }
 
-  function renderRun(): void {
-    const heading = document.createElement('div');
-    heading.className = 'ap-meta';
-    heading.textContent = state.agentRunning
-      ? `${provider().label} running…`
-      : state.runError
-        ? `${provider().label} failed`
-        : `${provider().label} finished`;
-    body.appendChild(heading);
+  function renderAgentTurn(): HTMLElement | null {
+    const hasContent = state.agentRunning || state.runLog || state.runError;
+    if (!hasContent) return null;
+
+    const turn = document.createElement('div');
+    turn.className = 'ap-turn ap-turn-agent';
+    if (state.runError) turn.classList.add('is-error');
+    if (state.agentRunning) turn.classList.add('is-running');
+
+    const meta = document.createElement('div');
+    meta.className = 'ap-turn-meta';
+    const role = document.createElement('span');
+    role.className = 'ap-turn-role';
+    role.textContent = provider().label;
+    meta.appendChild(role);
+    const statusBadge = document.createElement('span');
+    statusBadge.className = 'ap-turn-status';
+    if (state.agentRunning) {
+      const dot = document.createElement('span');
+      dot.className = 'ap-spinner';
+      statusBadge.appendChild(dot);
+      const label = document.createElement('span');
+      label.textContent = 'thinking';
+      statusBadge.appendChild(label);
+    } else if (state.runError) {
+      statusBadge.textContent = 'failed';
+      statusBadge.classList.add('is-error');
+    } else {
+      statusBadge.textContent = 'done';
+    }
+    meta.appendChild(statusBadge);
+    turn.appendChild(meta);
 
     if (state.runError) {
       const err = document.createElement('div');
-      err.className = 'ap-error';
+      err.className = 'ap-turn-error';
       err.textContent = state.runError;
-      body.appendChild(err);
+      turn.appendChild(err);
     }
 
     if (state.runLog) {
       const log = document.createElement('pre');
-      log.className = 'ap-log';
+      log.className = 'ap-turn-log';
       log.textContent = state.runLog;
-      body.appendChild(log);
+      turn.appendChild(log);
       queueMicrotask(() => {
         log.scrollTop = log.scrollHeight;
+        conversation.scrollTop = conversation.scrollHeight;
       });
     }
 
-    const footer = document.createElement('div');
-    footer.className = 'ap-footer';
+    // Inline actions for terminal states. Retry on error reuses the same
+    // prompt and target; Dismiss clears the turn so the composer is clean.
     if (!state.agentRunning) {
+      const actions = document.createElement('div');
+      actions.className = 'ap-turn-actions';
+      if (state.runError && lastSubmittedPrompt) {
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'ap-btn-ghost';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', () => {
+          const prompt = lastSubmittedPrompt;
+          clearLog();
+          opts.actions.onRunAgent(prompt);
+        });
+        actions.appendChild(retry);
+      }
       const dismiss = document.createElement('button');
       dismiss.type = 'button';
-      dismiss.className = 'ap-btn-ghost';
-      dismiss.textContent = 'New prompt';
-      dismiss.addEventListener('click', () => clearLog());
-      footer.appendChild(dismiss);
-    } else {
-      const note = document.createElement('span');
-      note.className = 'ap-subhint';
-      note.textContent = `Streaming output from ${provider().label}…`;
-      footer.appendChild(note);
+      dismiss.className = 'ap-btn-link';
+      dismiss.textContent = 'Dismiss';
+      dismiss.addEventListener('click', () => {
+        lastSubmittedPrompt = '';
+        clearLog();
+      });
+      actions.appendChild(dismiss);
+      turn.appendChild(actions);
     }
-    body.appendChild(footer);
+
+    return turn;
+  }
+
+  function renderDock(): void {
+    dock.innerHTML = '';
+    if (!state.connected) {
+      dock.appendChild(renderConnectCard());
+    } else {
+      dock.appendChild(renderComposer());
+    }
+  }
+
+  function renderConnectCard(): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'ap-connect';
+
+    const heading = document.createElement('div');
+    heading.className = 'ap-connect-heading';
+    heading.textContent = 'Connect an agent';
+    card.appendChild(heading);
+
+    const sub = document.createElement('div');
+    sub.className = 'ap-connect-sub';
+    sub.textContent =
+      state.providerId === 'claude-code'
+        ? 'Claude Code uses your existing CLI login, or paste a key below.'
+        : 'Cursor needs an API key to edit your selection.';
+    card.appendChild(sub);
+
+    const choices = document.createElement('div');
+    choices.className = 'ap-connect-choices';
+    for (const id of Object.keys(PROVIDERS) as AgentProviderId[]) {
+      const meta = PROVIDERS[id];
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className =
+        'ap-choice' + (state.providerId === id ? ' is-active' : '');
+      btn.textContent = meta.shortLabel;
+      btn.setAttribute(
+        'aria-pressed',
+        state.providerId === id ? 'true' : 'false',
+      );
+      btn.addEventListener('click', () => {
+        if (state.providerId === id) return;
+        showKeyInput = false;
+        pendingKey = '';
+        opts.actions.onSelectProvider(id);
+      });
+      choices.appendChild(btn);
+    }
+    card.appendChild(choices);
+
+    if (showKeyInput) {
+      const keyRow = document.createElement('div');
+      keyRow.className = 'ap-key-row';
+      const input = document.createElement('input');
+      input.type = 'password';
+      input.placeholder = provider().keyPlaceholder;
+      input.className = 'ap-input';
+      input.spellcheck = false;
+      input.autocomplete = 'off';
+      input.value = pendingKey;
+      const connectBtn = document.createElement('button');
+      connectBtn.type = 'button';
+      connectBtn.className = 'ap-btn-primary';
+      connectBtn.textContent = 'Connect';
+      connectBtn.disabled = input.value.trim().length === 0;
+      const submit = () => {
+        const value = input.value.trim();
+        if (!value) return;
+        pendingKey = '';
+        showKeyInput = false;
+        opts.actions.onSaveApiKey(value);
+      };
+      input.addEventListener('input', () => {
+        pendingKey = input.value;
+        connectBtn.disabled = input.value.trim().length === 0;
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && input.value.trim().length > 0) {
+          e.preventDefault();
+          submit();
+        }
+      });
+      connectBtn.addEventListener('click', submit);
+      keyRow.appendChild(input);
+      keyRow.appendChild(connectBtn);
+      card.appendChild(keyRow);
+      queueMicrotask(() => input.focus());
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'ap-connect-footer';
+    const keyToggle = document.createElement('button');
+    keyToggle.type = 'button';
+    keyToggle.className = 'ap-btn-link';
+    keyToggle.textContent = showKeyInput ? 'Hide key input' : 'Paste API key';
+    keyToggle.addEventListener('click', () => {
+      showKeyInput = !showKeyInput;
+      render();
+    });
+    footer.appendChild(keyToggle);
+
+    const docsLink = document.createElement('button');
+    docsLink.type = 'button';
+    docsLink.className = 'ap-btn-link';
+    docsLink.textContent = provider().dashboardLabel;
+    docsLink.addEventListener('click', () => {
+      if (state.providerId === 'cursor') opts.actions.onOpenDashboard();
+      else opts.actions.onOpenClaudeDocs();
+    });
+    footer.appendChild(docsLink);
+    card.appendChild(footer);
+
+    return card;
+  }
+
+  function renderComposer(): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'ap-composer-wrap';
+
+    // Target chip: pill-shaped pseudo-input that anchors the composer to
+    // a concrete selection. Falls back to a "Page" pill so the user always
+    // knows what scope a prompt will affect.
+    const chip = document.createElement('div');
+    chip.className = 'ap-chip';
+    if (state.selectedLabel) {
+      chip.classList.add('is-element');
+      const icon = document.createElement('span');
+      icon.className = 'ap-chip-icon';
+      icon.textContent = '◎';
+      icon.setAttribute('aria-hidden', 'true');
+      chip.appendChild(icon);
+      const label = document.createElement('span');
+      label.className = 'ap-chip-label';
+      label.textContent = state.selectedLabel;
+      label.title = state.selectedLabel;
+      chip.appendChild(label);
+    } else {
+      chip.classList.add('is-page');
+      chip.textContent = 'Page-level prompt — no element selected';
+    }
+    wrap.appendChild(chip);
+
+    const composer = document.createElement('div');
+    composer.className = 'ap-composer';
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'ap-textarea';
+    textarea.rows = 2;
+    textarea.placeholder = state.selectedLabel
+      ? 'Ask the agent to edit this element…'
+      : 'Ask the agent to edit this page…';
+    textarea.value = pendingPrompt;
+    textarea.disabled = state.agentRunning;
+
+    const send = document.createElement('button');
+    send.type = 'button';
+    send.className = 'ap-send';
+    send.setAttribute('aria-label', 'Send prompt (⌘↩)');
+    send.title = 'Send prompt (⌘↩)';
+    send.innerHTML = SEND_ICON;
+    send.disabled = textarea.value.trim().length === 0 || state.agentRunning;
+
+    const submit = () => {
+      const value = textarea.value.trim();
+      if (!value) return;
+      lastSubmittedPrompt = value;
+      pendingPrompt = '';
+      opts.actions.onRunAgent(value);
+    };
+
+    textarea.addEventListener('input', () => {
+      pendingPrompt = textarea.value;
+      send.disabled =
+        textarea.value.trim().length === 0 || state.agentRunning;
+      autosize(textarea);
+    });
+    textarea.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        submit();
+      }
+    });
+    send.addEventListener('click', submit);
+
+    composer.appendChild(textarea);
+    composer.appendChild(send);
+    wrap.appendChild(composer);
+    queueMicrotask(() => autosize(textarea));
+
+    wrap.appendChild(renderRail());
+    return wrap;
+  }
+
+  function renderRail(): HTMLElement {
+    const rail = document.createElement('div');
+    rail.className = 'ap-rail';
+
+    const providerBadge = document.createElement('button');
+    providerBadge.type = 'button';
+    providerBadge.className = 'ap-rail-provider';
+    providerBadge.title = 'Switch agent';
+    providerBadge.setAttribute('aria-haspopup', 'menu');
+    const dot = document.createElement('span');
+    dot.className =
+      'ap-rail-dot' +
+      (state.agentRunning
+        ? ' is-running'
+        : state.connected
+          ? ' is-on'
+          : ' is-off');
+    providerBadge.appendChild(dot);
+    const providerName = document.createElement('span');
+    providerName.textContent = provider().shortLabel;
+    providerBadge.appendChild(providerName);
+    if (state.model) {
+      const model = document.createElement('span');
+      model.className = 'ap-rail-model';
+      model.textContent = state.model;
+      model.title = `Model: ${state.model}`;
+      providerBadge.appendChild(model);
+    }
+    if (state.agentRunning) {
+      const tag = document.createElement('span');
+      tag.className = 'ap-rail-tag';
+      tag.textContent = 'running';
+      providerBadge.appendChild(tag);
+    }
+    providerBadge.addEventListener('click', toggleMenu);
+    rail.appendChild(providerBadge);
+
+    const hint = document.createElement('span');
+    hint.className = 'ap-rail-hint';
+    hint.textContent = '⌘↩';
+    rail.appendChild(hint);
+
+    const overflow = document.createElement('button');
+    overflow.type = 'button';
+    overflow.className = 'ap-rail-overflow';
+    overflow.setAttribute('aria-label', 'Agent options');
+    overflow.setAttribute('aria-haspopup', 'menu');
+    overflow.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
+    overflow.textContent = '⋯';
+    overflow.addEventListener('click', toggleMenu);
+    rail.appendChild(overflow);
+
+    if (menuOpen) rail.appendChild(renderMenu());
+    return rail;
+  }
+
+  function renderMenu(): HTMLElement {
+    const menu = document.createElement('div');
+    menu.className = 'ap-menu';
+    menu.setAttribute('role', 'menu');
+
+    const otherId: AgentProviderId =
+      state.providerId === 'cursor' ? 'claude-code' : 'cursor';
+    addMenuItem(menu, `Switch to ${PROVIDERS[otherId].label}`, () => {
+      menuOpen = false;
+      opts.actions.onSelectProvider(otherId);
+    });
+
+    addMenuItem(
+      menu,
+      state.model ? `Change model (${state.model})…` : 'Change model…',
+      () => {
+        menuOpen = false;
+        render();
+        opts.actions.onChangeModel();
+      },
+    );
+
+    if (state.connected) {
+      const disconnectLabel =
+        state.providerId === 'claude-code'
+          ? 'Forget API key'
+          : 'Disconnect Cursor';
+      addMenuItem(menu, disconnectLabel, () => {
+        menuOpen = false;
+        opts.actions.onForgetApiKey();
+      });
+    }
+
+    const hasTurn = Boolean(lastSubmittedPrompt) || Boolean(state.runLog);
+    if (hasTurn && !state.agentRunning) {
+      addMenuItem(menu, 'Clear conversation', () => {
+        menuOpen = false;
+        lastSubmittedPrompt = '';
+        clearLog();
+      });
+    }
+
+    addMenuItem(
+      menu,
+      state.providerId === 'cursor'
+        ? 'Open Cursor Dashboard'
+        : 'Open Claude Code Docs',
+      () => {
+        menuOpen = false;
+        if (state.providerId === 'cursor') opts.actions.onOpenDashboard();
+        else opts.actions.onOpenClaudeDocs();
+      },
+    );
+
+    return menu;
+  }
+
+  function addMenuItem(
+    menu: HTMLElement,
+    label: string,
+    onClick: () => void,
+  ): void {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'ap-menu-item';
+    item.setAttribute('role', 'menuitem');
+    item.textContent = label;
+    item.addEventListener('click', onClick);
+    menu.appendChild(item);
+  }
+
+  function toggleMenu(): void {
+    menuOpen = !menuOpen;
+    render();
+  }
+
+  function autosize(t: HTMLTextAreaElement): void {
+    t.style.height = 'auto';
+    const max = 160;
+    const next = Math.min(t.scrollHeight, max);
+    t.style.height = `${next}px`;
   }
 
   function setState(patch: Partial<AgentPanelState>): void {
@@ -355,6 +610,23 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     render();
   }
 
+  // Close the overflow menu when clicking anywhere outside the rail. Using
+  // capture so we win against the click that opened it on the rail itself.
+  const onDocClick = (e: MouseEvent) => {
+    if (!menuOpen) return;
+    const target = e.target as Node | null;
+    if (target && root.contains(target)) {
+      const insideMenu = (target as HTMLElement).closest?.('.ap-menu');
+      const onTrigger = (target as HTMLElement).closest?.(
+        '.ap-rail-overflow, .ap-rail-provider',
+      );
+      if (insideMenu || onTrigger) return;
+    }
+    menuOpen = false;
+    render();
+  };
+  document.addEventListener('mousedown', onDocClick, true);
+
   opts.host.appendChild(root);
   render();
 
@@ -364,10 +636,14 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     clearLog,
     setError,
     destroy() {
+      document.removeEventListener('mousedown', onDocClick, true);
       root.remove();
     },
   };
 }
+
+const SEND_ICON =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3"/><path d="M3.5 7.5 8 3l4.5 4.5"/></svg>';
 
 let cssInjected = false;
 function injectCss(): void {
@@ -394,135 +670,384 @@ const AP_CSS = `
   overflow: hidden;
 }
 
-.ap-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
-  background: var(--vscode-sideBarSectionHeader-background, transparent);
-}
-.ap-title {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  opacity: 0.85;
-}
-.ap-provider-toggle {
-  display: inline-flex;
-  gap: 2px;
-  margin-left: 4px;
-  padding: 1px;
-  border-radius: 3px;
-  background: var(--vscode-input-background, rgba(0,0,0,0.15));
-  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
-}
-.ap-provider-pill {
-  font: inherit;
-  font-size: 10.5px;
-  line-height: 1;
-  padding: 3px 8px;
-  background: transparent;
-  color: inherit;
-  border: none;
-  border-radius: 2px;
-  cursor: pointer;
-  opacity: 0.7;
-}
-.ap-provider-pill:hover { opacity: 1; }
-.ap-provider-pill:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
-.ap-provider-pill.is-active {
-  background: var(--vscode-button-background, #0e639c);
-  color: var(--vscode-button-foreground, #ffffff);
-  opacity: 1;
-}
-.ap-status {
-  margin-left: auto;
-  font-size: 10.5px;
-  opacity: 0.55;
-  font-variant: small-caps;
-  letter-spacing: 0.04em;
-}
-
-.ap-body {
-  flex: 1;
+.ap-conversation {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 8px 10px 10px 10px;
-  min-height: 0;
+  gap: 8px;
+  padding: 10px 10px 4px 10px;
 }
-.ap-body::-webkit-scrollbar { width: 8px; }
-.ap-body::-webkit-scrollbar-thumb {
+.ap-conversation::-webkit-scrollbar { width: 8px; }
+.ap-conversation::-webkit-scrollbar-thumb {
   background: var(--vscode-scrollbarSlider-background, rgba(128,128,128,0.4));
   border-radius: 4px;
 }
 
-.ap-row {
+.ap-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ap-turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  opacity: 0.7;
+}
+.ap-turn-role { font-weight: 600; letter-spacing: 0.02em; }
+.ap-turn-target {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(128,128,128,0.18));
+  color: var(--vscode-badge-foreground, inherit);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-turn-status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.7;
+  text-transform: lowercase;
+}
+.ap-turn-status.is-error {
+  color: var(--vscode-errorForeground, #e06c6c);
+  opacity: 1;
+}
+.ap-turn-user .ap-turn-body {
+  font-size: 11.5px;
+  line-height: 1.45;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-input-background, rgba(128,128,128,0.08));
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ap-turn-error {
+  font-size: 11.5px;
+  color: var(--vscode-errorForeground, #e06c6c);
+  white-space: pre-wrap;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-inputValidation-errorBackground, rgba(224,108,108,0.08));
+  border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(224,108,108,0.4));
+}
+.ap-turn-log {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow: auto;
+  background: var(--vscode-textCodeBlock-background, rgba(0, 0, 0, 0.22));
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
+  border-radius: 4px;
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.ap-turn-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.ap-spinner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.4px solid currentColor;
+  border-right-color: transparent;
+  animation: ap-spin 0.9s linear infinite;
+  display: inline-block;
+}
+@keyframes ap-spin { to { transform: rotate(360deg); } }
+
+.ap-dock {
+  flex: 0 0 auto;
+  padding: 8px 10px 10px 10px;
+  border-top: 1px solid transparent;
+}
+.ap-root[data-has-turn="true"] .ap-dock {
+  border-top-color: var(--vscode-panel-border, rgba(128,128,128,0.18));
+}
+
+/* ---------- Composer ---------- */
+.ap-composer-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ap-chip {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  background: var(--vscode-badge-background, rgba(128,128,128,0.18));
+  color: var(--vscode-badge-foreground, inherit);
+}
+.ap-chip.is-page {
+  background: transparent;
+  border: 1px dashed var(--vscode-panel-border, rgba(128,128,128,0.3));
+  color: inherit;
+  opacity: 0.65;
+}
+.ap-chip-icon { font-size: 10px; opacity: 0.8; }
+.ap-chip-label {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ap-composer {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  background: var(--vscode-input-background, rgba(0,0,0,0.06));
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
+  border-radius: 6px;
+  transition: border-color 120ms ease;
+}
+.ap-composer:focus-within {
+  border-color: var(--vscode-focusBorder, #007acc);
+}
+.ap-textarea {
+  flex: 1;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--vscode-input-foreground, inherit);
+  background: transparent;
+  border: none;
+  resize: none;
+  padding: 7px 36px 7px 9px;
+  min-height: 32px;
+  max-height: 160px;
+  outline: none;
+  overflow-y: auto;
+}
+.ap-textarea::placeholder {
+  color: var(--vscode-input-placeholderForeground, currentColor);
+  opacity: 0.55;
+}
+.ap-textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+.ap-send {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.ap-send:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+.ap-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.ap-send svg { display: block; }
+
+/* ---------- Rail ---------- */
+.ap-rail {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px 0 2px;
+  font-size: 10.5px;
+  opacity: 0.85;
+}
+.ap-rail-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 10.5px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.ap-rail-provider:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.12)); }
+.ap-rail-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground, #888);
+}
+.ap-rail-dot.is-on { background: var(--vscode-charts-green, #5fb35f); }
+.ap-rail-dot.is-off { background: var(--vscode-descriptionForeground, #888); opacity: 0.5; }
+.ap-rail-dot.is-running {
+  background: var(--vscode-charts-yellow, #d9a83a);
+  box-shadow: 0 0 0 0 currentColor;
+  animation: ap-pulse 1.4s ease-out infinite;
+}
+@keyframes ap-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(217,168,58,0.55); }
+  100% { box-shadow: 0 0 0 5px rgba(217,168,58,0); }
+}
+.ap-rail-tag {
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.ap-rail-model {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 9.5px;
+  opacity: 0.6;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-rail-hint {
+  margin-left: auto;
+  font-size: 10px;
+  opacity: 0.45;
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+}
+.ap-rail-overflow {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 6px;
+  cursor: pointer;
+  opacity: 0.7;
+  border-radius: 3px;
+}
+.ap-rail-overflow:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.12)); }
+
+/* ---------- Menu ---------- */
+.ap-menu {
+  position: absolute;
+  right: 0;
+  bottom: 22px;
+  min-width: 180px;
+  background: var(--vscode-menu-background, var(--vscode-editor-background));
+  color: var(--vscode-menu-foreground, inherit);
+  border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  padding: 3px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+}
+.ap-menu-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.ap-menu-item:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground, rgba(128,128,128,0.18)));
+  color: var(--vscode-menu-selectionForeground, inherit);
+}
+
+/* ---------- Connect ---------- */
+.ap-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.ap-connect-heading {
+  font-size: 12px;
+  font-weight: 600;
+}
+.ap-connect-sub {
+  font-size: 11px;
+  opacity: 0.7;
+  line-height: 1.4;
+}
+.ap-connect-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.ap-choice {
+  font: inherit;
+  font-size: 11.5px;
+  padding: 6px 8px;
+  background: var(--vscode-input-background, transparent);
+  color: inherit;
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.ap-choice:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.1));
+}
+.ap-choice.is-active {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+  border-color: transparent;
+}
+.ap-key-row {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 .ap-key-row .ap-input { flex: 1; }
-.ap-meta {
-  font-size: 11px;
-  opacity: 0.85;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ap-hint {
-  margin: 0;
-  font-size: 11.5px;
-  opacity: 0.75;
-  line-height: 1.45;
-}
-.ap-subhint {
-  margin: 0;
-  font-size: 10.5px;
-  opacity: 0.55;
-  line-height: 1.4;
+.ap-connect-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 2px;
 }
 
+/* ---------- Shared atoms ---------- */
 .ap-input {
   font: inherit;
   font-size: 11.5px;
   color: var(--vscode-input-foreground, inherit);
   background: var(--vscode-input-background, transparent);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
-  border-radius: 2px;
-  padding: 3px 6px;
+  border-radius: 3px;
+  padding: 4px 7px;
   outline: none;
   min-width: 0;
 }
 .ap-input:focus { border-color: var(--vscode-focusBorder, #007acc); }
-
-.ap-textarea {
-  font: inherit;
-  font-size: 11.5px;
-  color: var(--vscode-input-foreground, inherit);
-  background: var(--vscode-input-background, transparent);
-  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
-  border-radius: 2px;
-  padding: 5px 7px;
-  resize: vertical;
-  min-height: 60px;
-  outline: none;
-}
-.ap-textarea:focus { border-color: var(--vscode-focusBorder, #007acc); }
-.ap-textarea:disabled { opacity: 0.55; cursor: not-allowed; }
-
-.ap-footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ap-footer .ap-subhint { flex: 1; }
 
 .ap-btn-primary {
   font: inherit;
@@ -530,8 +1055,8 @@ const AP_CSS = `
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #ffffff);
   border: none;
-  border-radius: 2px;
-  padding: 3px 10px;
+  border-radius: 3px;
+  padding: 4px 10px;
   cursor: pointer;
 }
 .ap-btn-primary:hover:not(:disabled) {
@@ -545,15 +1070,15 @@ const AP_CSS = `
   background: transparent;
   color: inherit;
   border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
-  border-radius: 2px;
-  padding: 3px 10px;
+  border-radius: 3px;
+  padding: 3px 9px;
   cursor: pointer;
 }
 .ap-btn-ghost:hover {
-  background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06));
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.12));
 }
 
-.ap-link {
+.ap-btn-link {
   font: inherit;
   font-size: 11px;
   background: transparent;
@@ -561,25 +1086,6 @@ const AP_CSS = `
   border: none;
   padding: 0;
   cursor: pointer;
-  text-decoration: underline;
 }
-
-.ap-error {
-  font-size: 11.5px;
-  color: var(--vscode-errorForeground, #e06c6c);
-  white-space: pre-wrap;
-}
-
-.ap-log {
-  margin: 0;
-  padding: 6px 8px;
-  max-height: 220px;
-  overflow: auto;
-  background: var(--vscode-textCodeBlock-background, rgba(0, 0, 0, 0.25));
-  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
-  border-radius: 2px;
-  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
-  white-space: pre-wrap;
-}
+.ap-btn-link:hover { text-decoration: underline; }
 `;

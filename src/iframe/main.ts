@@ -29,22 +29,44 @@ function postToParent(msg: IframeMessage): void {
   }
 }
 
-function reportError(message: string, stack?: string): void {
-  postToParent({ type: 'runtimeError', message, stack });
+function reportError(input: {
+  message: string;
+  stack?: string;
+  source?: 'finesse' | 'page';
+  filename?: string;
+  lineno?: number;
+  colno?: number;
+}): void {
+  postToParent({ type: 'runtimeError', ...input });
 }
 
 function start(): void {
+  setupGlobalErrorHandlers();
   const init = window.__FINESSE__;
   if (!init) {
-    reportError('init data missing (window.__FINESSE__)');
+    reportError({ source: 'finesse', message: 'init data missing (window.__FINESSE__)' });
     return;
   }
   const session = setupEditSession({
     initialOffsetMap: init.offsetMap,
     initialFileMeta: init.fileMeta,
     postToParent,
-    onError: reportError,
+    onError: (message, stack) => reportError({ source: 'finesse', message, stack }),
   });
+  setupReloadSocket(init.fileMeta.path);
+  setupHostMessageListener(session);
+  postReady(init);
+  if (init.fileMeta.renderMode === 'react') {
+    waitForReactDom(() => {
+      setupEditingUi(session);
+      discoverReactDom(init.fileMeta.path, init.offsetMap?.documentVersion);
+    });
+    return;
+  }
+  setupEditingUi(session);
+}
+
+function setupEditingUi(session: EditSession): void {
   setupOverlay({ session });
   setupHelpPanel(session);
   setupFormatToolbar({
@@ -52,17 +74,47 @@ function start(): void {
     onAction: makeDefaultActionHandler({ session }),
     onRefresh: makeDefaultRefreshHandler({ session }),
   });
-  setupReloadSocket(init.fileMeta.path);
-  setupHostMessageListener(session);
-  setupGlobalErrorHandlers();
-  if (init.fileMeta.renderMode === 'react') {
-    discoverReactDom(init.fileMeta.path, init.offsetMap?.documentVersion);
-  }
+}
+
+function postReady(init: InitData): void {
   postToParent({
     type: 'ready',
     path: init.fileMeta.path,
     documentVersion: init.offsetMap?.documentVersion,
   });
+}
+
+function waitForReactDom(callback: () => void): void {
+  if (hasReactLocDescendants()) {
+    callback();
+    return;
+  }
+  const started = Date.now();
+  const timeoutMs = 5000;
+  let done = false;
+  const finish = (): void => {
+    if (done) return;
+    done = true;
+    observer.disconnect();
+    callback();
+  };
+  const observer = new MutationObserver(() => {
+    if (!hasReactLocDescendants()) return;
+    finish();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  const fallback = (): void => {
+    if (hasReactLocDescendants() || Date.now() - started >= timeoutMs) {
+      finish();
+      return;
+    }
+    window.setTimeout(fallback, 100);
+  };
+  window.setTimeout(fallback, 100);
+}
+
+function hasReactLocDescendants(): boolean {
+  return Boolean(document.body?.querySelector('[data-loc]'));
 }
 
 function discoverReactDom(path: string, documentVersion?: number): void {
@@ -101,7 +153,7 @@ function setupReloadSocket(path: string): void {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       socket = new WebSocket(`${proto}://${location.host}/__edit/socket`);
     } catch (err) {
-      reportError(`reload socket failed: ${(err as Error).message}`);
+      reportError({ source: 'finesse', message: `reload socket failed: ${(err as Error).message}` });
       return;
     }
     socket.addEventListener('open', () => {
@@ -176,13 +228,29 @@ function setupHostMessageListener(session: EditSession): void {
 }
 
 function setupGlobalErrorHandlers(): void {
+  let last = '';
   window.addEventListener('error', (e: ErrorEvent) => {
-    reportError(e.message, e.error instanceof Error ? e.error.stack : undefined);
+    const message = e.message || 'Script error';
+    const stack = e.error instanceof Error ? e.error.stack : undefined;
+    const key = `${message}|${e.filename}|${e.lineno}|${e.colno}`;
+    if (key === last) return;
+    last = key;
+    reportError({
+      source: 'page',
+      message,
+      stack,
+      filename: e.filename || undefined,
+      lineno: e.lineno || undefined,
+      colno: e.colno || undefined,
+    });
   });
   window.addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
     const reason = e.reason instanceof Error ? e.reason.message : String(e.reason);
     const stack = e.reason instanceof Error ? e.reason.stack : undefined;
-    reportError(reason, stack);
+    const key = `promise|${reason}|${stack ?? ''}`;
+    if (key === last) return;
+    last = key;
+    reportError({ source: 'page', message: `Unhandled promise rejection: ${reason}`, stack });
   });
 }
 

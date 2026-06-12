@@ -38,6 +38,7 @@ const CONTENT_TYPES: Record<string, string> = {
 class PreviewServerImpl implements PreviewServer {
   private server: http.Server | null = null;
   private socket: ReloadSocket | null = null;
+  private readonly proxySockets = new Set<Duplex>();
   private boundPort: number | null = null;
   private startPromise: Promise<number> | null = null;
   private readonly opts: PreviewServerOptions;
@@ -105,6 +106,10 @@ class PreviewServerImpl implements PreviewServer {
     const server = this.server;
     this.server = null;
     this.boundPort = null;
+    for (const socket of this.proxySockets) {
+      socket.destroy();
+    }
+    this.proxySockets.clear();
     if (server) {
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -123,12 +128,6 @@ class PreviewServerImpl implements PreviewServer {
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const pathname = decodeURIComponent(url.pathname);
-
-    if (pathname === '/') {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('No index. Open a specific HTML file.');
-      return;
-    }
 
     if (pathname === '/__edit/runtime.js') {
       this.serveRuntime(req, res);
@@ -152,8 +151,14 @@ class PreviewServerImpl implements PreviewServer {
     }
 
     const ext = path.extname(resolved).toLowerCase();
-    if (this.shouldProxyReactRequest(pathname)) {
+    const hasWorkspaceFile = isRegularFile(resolved);
+    if (this.shouldProxyReactRequest(pathname, { hasWorkspaceFile })) {
       this.proxyReact(pathname, req, res);
+      return;
+    }
+    if (pathname === '/') {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('No index. Open a specific HTML file.');
       return;
     }
     if (ext === '.html' || ext === '.htm') {
@@ -173,19 +178,23 @@ class PreviewServerImpl implements PreviewServer {
   private proxyReact(pathname: string, req: http.IncomingMessage, res: http.ServerResponse): void {
     const target = this.reactTargetFor(pathname, req.url ?? pathname);
     if (!target) {
-      res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(503, diagnosticResponseHeaders('text/html; charset=utf-8'));
       res.end(reactSetupHtml());
       return;
     }
     const client = target.protocol === 'https:' ? https : http;
-    const headers = { ...req.headers, host: target.host };
+    const headers = proxyRequestHeaders(req.headers, target, {
+      // HTML responses are rewritten below, so ask the dev server for bytes we
+      // can safely treat as UTF-8 instead of compressed browser payloads.
+      acceptEncoding: 'identity',
+    });
     const proxyReq = client.request(
       target,
       { method: req.method, headers },
       (proxyRes) => {
         const contentType = String(proxyRes.headers['content-type'] ?? '');
         if (!contentType.includes('text/html')) {
-          res.writeHead(proxyRes.statusCode ?? 200, proxyResponseHeaders(proxyRes.headers));
+          res.writeHead(proxyRes.statusCode ?? 200, proxyPassThroughHeaders(proxyRes.headers));
           proxyRes.pipe(res);
           return;
         }
@@ -204,7 +213,7 @@ class PreviewServerImpl implements PreviewServer {
             },
           });
           res.writeHead(proxyRes.statusCode ?? 200, {
-            ...proxyResponseHeaders(proxyRes.headers),
+            ...proxyRewrittenHtmlHeaders(proxyRes.headers),
             'content-type': 'text/html; charset=utf-8',
             'cache-control': 'no-store',
             'content-length': Buffer.byteLength(html),
@@ -214,7 +223,7 @@ class PreviewServerImpl implements PreviewServer {
       },
     );
     proxyReq.on('error', (err) => {
-      res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(502, diagnosticResponseHeaders('text/html; charset=utf-8'));
       res.end(reactProxyErrorHtml(err instanceof Error ? err.message : String(err)));
     });
     req.pipe(proxyReq);
@@ -222,7 +231,7 @@ class PreviewServerImpl implements PreviewServer {
 
   private handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
-    if (!this.shouldProxyReactRequest(pathname)) {
+    if (!this.shouldProxyReactRequest(pathname, { hasWorkspaceFile: false })) {
       socket.destroy();
       return;
     }
@@ -231,10 +240,16 @@ class PreviewServerImpl implements PreviewServer {
       socket.destroy();
       return;
     }
+    this.proxySockets.add(socket);
+    const cleanup = (): void => {
+      this.proxySockets.delete(socket);
+    };
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
     const client = target.protocol === 'https:' ? https : http;
     const proxyReq = client.request(target, {
       method: req.method,
-      headers: { ...req.headers, host: target.host },
+      headers: proxyRequestHeaders(req.headers, target),
     });
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
       socket.write(
@@ -253,8 +268,12 @@ class PreviewServerImpl implements PreviewServer {
     proxyReq.end();
   }
 
-  private shouldProxyReactRequest(pathname: string): boolean {
+  private shouldProxyReactRequest(
+    pathname: string,
+    opts: { hasWorkspaceFile?: boolean } = {},
+  ): boolean {
     if (!this.opts.getReactDevServerUrl?.()) return false;
+    if (pathname === '/__edit/runtime.js' || pathname.startsWith('/__edit/')) return false;
     return (
       pathname === '/__react' ||
       pathname.startsWith('/__react/') ||
@@ -262,9 +281,9 @@ class PreviewServerImpl implements PreviewServer {
       pathname.startsWith('/@react-refresh') ||
       pathname.startsWith('/src/') ||
       pathname.startsWith('/node_modules/') ||
-      pathname.startsWith('/__next/') ||
       pathname.startsWith('/_next/') ||
-      /\.(jsx|tsx|ts|js|mjs|css|map)($|\?)/.test(pathname)
+      pathname.startsWith('/__next/') ||
+      (!opts.hasWorkspaceFile && pathname.startsWith('/'))
     );
   }
 
@@ -391,11 +410,47 @@ class PreviewServerImpl implements PreviewServer {
   }
 }
 
-function proxyResponseHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
-  const out: http.OutgoingHttpHeaders = { ...headers };
-  delete out['content-length'];
+function proxyPassThroughHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {
+    ...headers,
+    'access-control-allow-origin': '*',
+  };
   delete out['content-security-policy'];
   delete out['x-frame-options'];
+  return out;
+}
+
+function proxyRequestHeaders(
+  headers: http.IncomingHttpHeaders,
+  target: URL,
+  opts: { acceptEncoding?: string } = {},
+): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {
+    ...headers,
+    host: target.host,
+  };
+  if (opts.acceptEncoding) out['accept-encoding'] = opts.acceptEncoding;
+  if (typeof headers.origin === 'string') {
+    out.origin = target.origin;
+  }
+  if (typeof headers.referer === 'string') {
+    try {
+      const referer = new URL(headers.referer);
+      referer.protocol = target.protocol;
+      referer.host = target.host;
+      out.referer = referer.toString();
+    } catch {
+      out.referer = `${target.origin}/`;
+    }
+  }
+  return out;
+}
+
+function proxyRewrittenHtmlHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  const out = proxyPassThroughHeaders(headers);
+  delete out['content-length'];
+  delete out['transfer-encoding'];
+  delete out['content-encoding'];
   return out;
 }
 
@@ -408,6 +463,13 @@ function reactSetupHtml(): string {
     <p>Install and enable <code>jsx-loc-plugin</code> in that app so Finesse can map DOM nodes to JSX source.</p>
   </body>
 </html>`;
+}
+
+function diagnosticResponseHeaders(contentType: string): http.OutgoingHttpHeaders {
+  return {
+    'Content-Type': contentType,
+    'Access-Control-Allow-Origin': '*',
+  };
 }
 
 function reactProxyErrorHtml(message: string): string {
@@ -425,6 +487,14 @@ function reactProxyErrorHtml(message: string): string {
 function reactSourceExt(relPath: string): boolean {
   const ext = path.extname(relPath).toLowerCase();
   return ext === '.jsx' || ext === '.tsx';
+}
+
+function isRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function createPreviewServer(opts: PreviewServerOptions): PreviewServer {

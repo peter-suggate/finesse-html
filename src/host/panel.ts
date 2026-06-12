@@ -96,11 +96,13 @@ export interface PreviewPanel {
   onDocumentChanged(doc: vscode.TextDocument, kind: 'self' | 'external'): void;
   onDocumentSaved(doc: vscode.TextDocument): void;
   setAgentProvider(providerId: AgentProviderId): void;
+  refreshAgentModel(): void;
 }
 
 interface PageState {
   uri: vscode.Uri;
   relativePath: string;
+  virtual: boolean;
   jsMode: boolean;
   renderMode: NonNullable<FileMeta['renderMode']>;
   escapeReplacement?: ReplacementEscaper;
@@ -198,14 +200,51 @@ export interface PanelDeps {
   onDispose: () => void;
 }
 
+interface PreviewPanelInitSource {
+  uri: vscode.Uri;
+  relativePath: string;
+  title: string;
+  initialDocument?: vscode.TextDocument;
+  virtual?: boolean;
+  renderMode?: NonNullable<FileMeta['renderMode']>;
+}
+
 type IncomingMessage = IframeMessage | WebviewActionMessage;
 
 export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDeps): PreviewPanel {
-  const relativePath = relativeWebPath(deps.workspaceRoot, document.uri.fsPath);
-  const key = document.uri.toString();
+  return createPreviewPanelFromSource(
+    {
+      uri: document.uri,
+      relativePath: relativeWebPath(deps.workspaceRoot, document.uri.fsPath),
+      title: `Finesse: ${path.basename(document.uri.fsPath)}`,
+      initialDocument: document,
+    },
+    deps,
+  );
+}
+
+export function createDevServerPreviewPanel(deps: PanelDeps): PreviewPanel {
+  return createPreviewPanelFromSource(
+    {
+      uri: vscode.Uri.parse('finesse-dev-server:/preview.tsx'),
+      relativePath: '__finesse_dev_server__/preview.tsx',
+      title: 'Finesse: Dev Server',
+      virtual: true,
+      renderMode: 'react',
+    },
+    deps,
+  );
+}
+
+function createPreviewPanelFromSource(
+  initial: PreviewPanelInitSource,
+  deps: PanelDeps,
+): PreviewPanel {
+  const relativePath = initial.relativePath;
+  const key = initial.uri.toString();
   const panel = vscode.window.createWebviewPanel(
     'finesse.preview',
-    `Finesse: ${path.basename(document.uri.fsPath)}`,
+    initial.title,
     vscode.ViewColumn.Beside,
     {
       enableScripts: true,
@@ -227,15 +266,20 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     return pages.get(activeRelativePath) ?? pages.get(relativePath)!;
   }
 
-  function createPageState(uri: vscode.Uri, doc?: vscode.TextDocument): PageState {
-    const relPath = relativeWebPath(deps.workspaceRoot, uri.fsPath);
+  function createPageState(
+    uri: vscode.Uri,
+    doc?: vscode.TextDocument,
+    opts: { relativePath?: string; virtual?: boolean; renderMode?: NonNullable<FileMeta['renderMode']> } = {},
+  ): PageState {
+    const relPath = opts.relativePath ?? relativeWebPath(deps.workspaceRoot, uri.fsPath);
     const jsMode = doc ? isJsLikeDocument(doc) : false;
     const reactMode = doc ? isReactDocument(doc) : false;
     const page: PageState = {
       uri,
       relativePath: relPath,
+      virtual: opts.virtual ?? false,
       jsMode,
-      renderMode: reactMode ? 'react' : jsMode ? 'templateLiteral' : 'html',
+      renderMode: opts.renderMode ?? (reactMode ? 'react' : jsMode ? 'templateLiteral' : 'html'),
       escapeReplacement: jsMode ? escapeForJsTemplate : undefined,
       currentVersion: doc?.version ?? 1,
       currentOffsetMap: null,
@@ -245,7 +289,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
       expectedSelfEditVersion: null,
     };
     pages.set(relPath, page);
-    const text = doc?.getText() ?? readPageFromDisk(page);
+    const text = page.virtual ? '' : doc?.getText() ?? readPageFromDisk(page);
     if (text !== null) reparsePage(page, text, page.currentVersion);
     return page;
   }
@@ -287,6 +331,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   function readPageFromDisk(page: PageState): string | null {
+    if (page.virtual) return '';
     try {
       return fs.readFileSync(page.uri.fsPath, 'utf-8');
     } catch {
@@ -316,6 +361,9 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   async function openDocumentForPage(page: PageState): Promise<vscode.TextDocument> {
+    if (page.virtual) {
+      throw new Error('The dev-server preview is not backed by a source document.');
+    }
     const open = findOpenDocument(page);
     if (open) return open;
     const doc = await vscode.workspace.openTextDocument(page.uri);
@@ -332,7 +380,11 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     return null;
   }
 
-  createPageState(document.uri, document);
+  createPageState(initial.uri, initial.initialDocument, {
+    relativePath: initial.relativePath,
+    virtual: initial.virtual,
+    renderMode: initial.renderMode,
+  });
 
   const initialPage = activePage();
   const iframeUrl =
@@ -402,9 +454,12 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   function postAgentProviderState(): void {
+    const cfg = deps.getConfig();
     const msg: AgentProviderState = {
       type: 'agentProviderState',
       providerId: selectedProvider,
+      model:
+        selectedProvider === 'cursor' ? cfg.agentCursorModel : cfg.agentClaudeModel,
     };
     panel.webview.postMessage(msg);
   }
@@ -518,6 +573,8 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
           if (isAgentProviderId(msg.providerId) && msg.providerId !== selectedProvider) {
             await setSelectedAgentProvider(msg.providerId, { persist: true });
           }
+        } else if (msg.action === 'changeAgentModel') {
+          await handleChangeAgentModel();
         } else if (msg.action === 'runAgent') {
           await handleRunAgentRequest(msg.value, msg.providerId);
         }
@@ -1094,7 +1151,72 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   function handleRuntimeError(msg: RuntimeError): void {
-    console.warn('[finesse] iframe runtime error:', msg.message, msg.stack);
+    const source = msg.source === 'page' ? 'page' : 'finesse';
+    console.warn(`[finesse] iframe ${source} error:`, msg.message, msg.stack);
+  }
+
+  /**
+   * Curated model choices per provider, shown in the Change Model quick pick.
+   * Free-form ids remain supported via the "Custom…" entry and the
+   * `finesse.agent.*Model` settings.
+   */
+  const AGENT_MODEL_CHOICES: Record<AgentProviderId, Array<{ id: string; detail: string }>> = {
+    'claude-code': [
+      { id: 'claude-opus-4-8', detail: 'Most capable Opus — recommended' },
+      { id: 'claude-fable-5', detail: 'Anthropic’s most capable model (premium pricing)' },
+      { id: 'claude-sonnet-4-6', detail: 'Best balance of speed and intelligence' },
+      { id: 'claude-haiku-4-5', detail: 'Fastest and most cost-effective' },
+      { id: 'claude-opus-4-7', detail: 'Previous-generation Opus' },
+    ],
+    cursor: [{ id: 'composer-2', detail: 'Cursor’s default agent model' }],
+  };
+
+  async function handleChangeAgentModel(): Promise<void> {
+    const cfg = deps.getConfig();
+    const settingKey =
+      selectedProvider === 'cursor' ? 'agent.cursorModel' : 'agent.claudeModel';
+    const current =
+      selectedProvider === 'cursor' ? cfg.agentCursorModel : cfg.agentClaudeModel;
+    const choices = AGENT_MODEL_CHOICES[selectedProvider];
+
+    const CUSTOM = '$(edit) Custom model id…';
+    const items: vscode.QuickPickItem[] = [
+      ...choices.map((c) => ({
+        label: c.id,
+        detail: c.detail,
+        description: c.id === current ? 'current' : undefined,
+      })),
+      { label: CUSTOM, detail: 'Type any model id or alias (e.g. opus, sonnet)' },
+    ];
+    const picked = await vscode.window.showQuickPick(items, {
+      title: `Agent model (${selectedProvider === 'cursor' ? 'Cursor' : 'Claude Code'})`,
+      placeHolder: `Current: ${current}`,
+    });
+    if (!picked) return;
+
+    let model = picked.label;
+    if (model === CUSTOM) {
+      const typed = await vscode.window.showInputBox({
+        title: 'Custom model id',
+        value: current,
+        prompt: 'Model id passed to the agent for the next run',
+        validateInput: (v) => (v.trim().length === 0 ? 'Model id cannot be empty' : undefined),
+      });
+      if (!typed) return;
+      model = typed.trim();
+    }
+    if (model === current) return;
+
+    try {
+      // The config-change listener in extension.ts reposts provider state to
+      // every open panel once the new value lands.
+      await vscode.workspace
+        .getConfiguration('finesse')
+        .update(settingKey, model, vscode.ConfigurationTarget.Global);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(`Finesse could not save the model: ${message}`);
+    }
   }
 
   async function setSelectedAgentProvider(
@@ -1115,7 +1237,7 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
   }
 
   return {
-    documentUri: document.uri,
+    documentUri: initial.uri,
     key,
     relativePath,
     get currentVersion() {
@@ -1229,6 +1351,9 @@ export function createPreviewPanel(document: vscode.TextDocument, deps: PanelDep
     setAgentProvider(providerId) {
       if (!isAgentProviderId(providerId) || providerId === selectedProvider) return;
       void setSelectedAgentProvider(providerId, { persist: false });
+    },
+    refreshAgentModel() {
+      postAgentProviderState();
     },
   };
 }

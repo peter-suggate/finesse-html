@@ -193,6 +193,7 @@ function bootIframe(init: InitData): void {
         onOpenClaudeDocs: () => post({ type: '__webview_action', action: 'openClaudeDocs' }),
         onSaveApiKey: (value) => post({ type: '__webview_action', action: 'saveApiKey', value }),
         onForgetApiKey: () => post({ type: '__webview_action', action: 'forgetApiKey' }),
+        onChangeModel: () => post({ type: '__webview_action', action: 'changeAgentModel' }),
         onSelectProvider: (providerId) => {
           currentAgentProvider = providerId;
           agentPanel?.setState({
@@ -246,7 +247,14 @@ function bootIframe(init: InitData): void {
       dismissPreviewLoadErrorBanner();
     }
     if (data.type === 'runtimeError') {
-      showRuntimeErrorBanner(data.message);
+      showRuntimeErrorBanner({
+        source: data.source,
+        message: data.message,
+        stack: data.stack,
+        filename: data.filename,
+        lineno: data.lineno,
+        colno: data.colno,
+      });
     }
     if (data.type === 'elementSelectionChanged') {
       sidePanel?.setSelection(data.selection as ElementSelectionSnapshot | null);
@@ -320,6 +328,7 @@ function bootIframe(init: InitData): void {
         currentAgentProvider = data.providerId;
         agentPanel?.setState({
           providerId: data.providerId,
+          model: data.model,
         });
         break;
       case 'agentRunStatus':

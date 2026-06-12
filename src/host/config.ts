@@ -45,7 +45,7 @@ export function readConfig(): ResolvedConfig {
     reactDevServerUrl: cfg.get<string>('reactDevServerUrl', ''),
     aiCommand: cfg.get<string>('aiCommand', ''),
     agentCursorModel: cfg.get<string>('agent.cursorModel', 'composer-2'),
-    agentClaudeModel: cfg.get<string>('agent.claudeModel', 'claude-opus-4-7'),
+    agentClaudeModel: cfg.get<string>('agent.claudeModel', 'claude-opus-4-8'),
     agentDefaultProvider,
   };
 }

@@ -49,6 +49,31 @@ export function injectElementIds(html: string, offsetMap: OffsetMap | null): str
   return pieces.join('');
 }
 
+const EARLY_ERROR_BRIDGE = `<script>
+(function(){
+  function send(payload){
+    try {
+      window.parent.postMessage(Object.assign({ type: 'runtimeError', source: 'page' }, payload), '*');
+    } catch (_) {}
+  }
+  window.addEventListener('error', function(e){
+    send({
+      message: e.message || 'Script error',
+      filename: e.filename || undefined,
+      lineno: e.lineno || undefined,
+      colno: e.colno || undefined,
+      stack: e.error && e.error.stack ? String(e.error.stack) : undefined
+    });
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    var reason = e.reason;
+    send({
+      message: 'Unhandled promise rejection: ' + (reason && reason.message ? reason.message : String(reason)),
+      stack: reason && reason.stack ? String(reason.stack) : undefined
+    });
+  });
+})();
+</script>`;
 const RUNTIME_SCRIPT_TAG = '<script src="/__edit/runtime.js"></script>';
 
 function jsonForScript(value: unknown): string {
@@ -58,7 +83,7 @@ function jsonForScript(value: unknown): string {
 
 export function injectInstrumentation(html: string, payload: InjectionPayload): string {
   const initScript = `<script>window.__FINESSE__ = ${jsonForScript(payload)};</script>`;
-  const injected = `\n${initScript}\n${RUNTIME_SCRIPT_TAG}\n`;
+  const injected = `\n${initScript}\n${EARLY_ERROR_BRIDGE}\n${RUNTIME_SCRIPT_TAG}\n`;
   const bodyClose = lastMatchIndex(html, /<\/body\s*>/i);
   if (bodyClose >= 0) {
     return html.slice(0, bodyClose) + injected + html.slice(bodyClose);
