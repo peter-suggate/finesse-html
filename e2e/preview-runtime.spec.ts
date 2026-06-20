@@ -532,7 +532,7 @@ test('native-click bypass allows native clicks on interactive preview elements',
 
     await page.locator('#accordion summary span').hover();
     await expect(page.locator('#finesse-native-click-hint')).toBeVisible();
-    await expect(page.locator('#finesse-native-click-hint')).toContainText('V');
+    await expect(page.locator('#finesse-native-click-hint')).toContainText(/⌥|Alt/);
     await expect(page.locator('#finesse-native-click-hint')).toContainText('click');
 
     await page.locator('#low-button').hover();
@@ -564,15 +564,15 @@ test('native-click bypass allows native clicks on interactive preview elements',
     await page.locator('#readonly-accordion summary').click();
     await expect(page.locator('#readonly-accordion')).not.toHaveAttribute('open', '');
 
-    await page.keyboard.down('v');
+    await page.keyboard.down('Alt');
     await page.locator('#accordion summary span').click();
-    await page.keyboard.up('v');
+    await page.keyboard.up('Alt');
     await expect(page.locator('#accordion')).toHaveAttribute('open', '');
     await expect(page.locator('#accordion summary')).not.toHaveAttribute('contenteditable', 'true');
 
-    await page.keyboard.down('v');
+    await page.keyboard.down('Alt');
     await page.locator('#readonly-accordion summary').click();
-    await page.keyboard.up('v');
+    await page.keyboard.up('Alt');
     await expect(page.locator('#readonly-accordion')).toHaveAttribute('open', '');
 
     await page.locator('#phase-button span').click();
@@ -580,21 +580,41 @@ test('native-click bypass allows native clicks on interactive preview elements',
     await expect(page.locator('#phase-button span')).toHaveAttribute('contenteditable', 'true');
     await page.keyboard.press('Escape');
 
+    // Option+click as a single gesture (modifier on the click itself) also
+    // passes the click through to the page.
     await page.locator('#phase-button span').click({ modifiers: ['Alt'] });
-    await expect(page.locator('body')).not.toHaveAttribute('data-phase');
-    await expect(page.locator('#phase-button span')).toHaveAttribute('contenteditable', 'true');
-    await page.keyboard.press('Escape');
-
-    await page.keyboard.down('v');
-    await page.locator('#phase-button span').click();
-    await page.keyboard.up('v');
     await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');
+    await expect(page.locator('#phase-button span')).not.toHaveAttribute('contenteditable', 'true');
 
-    await page.keyboard.down('v');
+    await page.keyboard.down('Alt');
     await page.locator('#jump-link span').click();
-    await page.keyboard.up('v');
+    await page.keyboard.up('Alt');
     await expect(page.locator('body')).toHaveAttribute('data-jump', 'clicked');
     await expect(page.locator('#copy')).not.toHaveAttribute('contenteditable', 'true');
+
+    // Double-tap Option locks interactive mode: clicks pass through with no
+    // key held. Escape exits it.
+    await page.evaluate(() => {
+      delete document.body.dataset.phase;
+    });
+    await page.keyboard.press('Alt');
+    await page.keyboard.press('Alt');
+    await expect(page.locator('#finesse-interact-toggle')).toContainText('exit');
+    await page.locator('#phase-button span').click();
+    await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');
+    await expect(page.locator('#phase-button span')).not.toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#finesse-interact-toggle')).toHaveText('Interact');
+
+    // The pinned Interact pill toggles the same mode.
+    await page.locator('#finesse-interact-toggle').click();
+    await expect(page.locator('#finesse-interact-toggle')).toContainText('exit');
+    await page.locator('#finesse-interact-toggle').click();
+    await expect(page.locator('#finesse-interact-toggle')).toHaveText('Interact');
+
+    await page.locator('#phase-button span').click();
+    await expect(page.locator('#phase-button span')).toHaveAttribute('contenteditable', 'true');
+    await page.keyboard.press('Escape');
   } finally {
     await harness.dispose();
   }

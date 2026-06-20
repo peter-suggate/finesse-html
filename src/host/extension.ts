@@ -11,10 +11,14 @@ import { createPreviewServer, type PreviewServer } from './server';
 interface ExtState {
   context: vscode.ExtensionContext;
   panels: Map<string, PreviewPanel>;
-  server: PreviewServer | null;
-  watcher: FileWatcher | null;
+  runtimes: Map<string, PreviewRuntime>;
   config: ResolvedConfig;
   idleTimer: ReturnType<typeof setTimeout> | null;
+}
+
+interface PreviewRuntime {
+  server: PreviewServer;
+  watcher: FileWatcher;
 }
 
 let state: ExtState | null = null;
@@ -23,8 +27,7 @@ export function activate(context: vscode.ExtensionContext): void {
   state = {
     context,
     panels: new Map(),
-    server: null,
-    watcher: null,
+    runtimes: new Map(),
     config: readConfig(),
     idleTimer: null,
   };
@@ -80,7 +83,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!state) return;
       state.config = cfg;
       if (event.affectsConfiguration('finesse.reloadDebounceMs')) {
-        state.watcher?.setDebounce(cfg.reloadDebounceMs);
+        for (const runtime of state.runtimes.values()) {
+          runtime.watcher.setDebounce(cfg.reloadDebounceMs);
+        }
       }
 
       if (event.affectsConfiguration('finesse.agent.provider')) {
@@ -120,9 +125,11 @@ export function deactivate(): void {
   if (state.idleTimer) clearTimeout(state.idleTimer);
   for (const panel of state.panels.values()) panel.dispose();
   state.panels.clear();
-  state.watcher?.dispose();
-  state.watcher = null;
-  void state.server?.stop();
+  for (const runtime of state.runtimes.values()) {
+    runtime.watcher.dispose();
+    void runtime.server.stop();
+  }
+  state.runtimes.clear();
   state = null;
 }
 
@@ -134,10 +141,11 @@ function scheduleIdleShutdown(): void {
     if (!state) return;
     state.idleTimer = null;
     if (state.panels.size > 0) return;
-    void state.server?.stop();
-    state.server = null;
-    state.watcher?.dispose();
-    state.watcher = null;
+    for (const runtime of state.runtimes.values()) {
+      runtime.watcher.dispose();
+      void runtime.server.stop();
+    }
+    state.runtimes.clear();
   }, ms);
 }
 
@@ -147,15 +155,13 @@ function cancelIdleShutdown(): void {
   state.idleTimer = null;
 }
 
-async function ensureServer(): Promise<PreviewServer> {
+async function ensureServer(previewRoot: string): Promise<PreviewServer> {
   if (!state) throw new Error('extension not activated');
-  if (state.server) {
-    await state.server.start();
-    return state.server;
-  }
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!workspaceRoot) {
-    throw new Error('No workspace folder open.');
+  const root = path.resolve(previewRoot);
+  const existing = state.runtimes.get(root);
+  if (existing) {
+    await existing.server.start();
+    return existing.server;
   }
   const runtimeBundlePath = path.join(
     state.context.extensionPath,
@@ -164,34 +170,31 @@ async function ensureServer(): Promise<PreviewServer> {
     'runtime.js',
   );
   const server = createPreviewServer({
-    workspaceRoot,
-    port: state.config.port,
+    workspaceRoot: root,
+    port: state.runtimes.size === 0 ? state.config.port : 'auto',
     runtimeBundlePath,
-    getDocumentText: (relPath) => readDocumentText(workspaceRoot, relPath),
+    getDocumentText: (relPath) => readDocumentText(root, relPath),
     getInjectedPreviewHtml: (relPath) =>
-      findPanelForPath(workspaceRoot, relPath)?.getInjectedPreviewHtmlForPath(relPath) ?? null,
+      findPanelForPath(root, relPath)?.getInjectedPreviewHtmlForPath(relPath) ?? null,
     getOffsetMap: (relPath) =>
-      findPanelForPath(workspaceRoot, relPath)?.getOffsetMapForPath(relPath) ?? null,
+      findPanelForPath(root, relPath)?.getOffsetMapForPath(relPath) ?? null,
     isTemplated: (relPath) =>
-      findPanelForPath(workspaceRoot, relPath)?.isTemplatedPath(relPath) ?? false,
+      findPanelForPath(root, relPath)?.isTemplatedPath(relPath) ?? false,
     getReactDevServerUrl: () => state?.config.reactDevServerUrl || null,
   });
   await server.start();
-  state.server = server;
-
-  if (!state.watcher) {
-    state.watcher = new FileWatcher({
-      debounceMs: state.config.reloadDebounceMs,
-      onHtmlChange: (uri) => {
-        if (!state) return;
-        void handleExternalHtmlChange(uri);
-      },
-      onAssetChange: (_uri) => {
-        // Any CSS/JS/asset change → reload all previews so they pull the new resource.
-        state?.server?.notifyReloadAll();
-      },
-    });
-  }
+  const watcher = new FileWatcher({
+    root: vscode.Uri.file(root),
+    debounceMs: state.config.reloadDebounceMs,
+    onHtmlChange: (uri) => {
+      if (!state) return;
+      void handleExternalHtmlChange(uri);
+    },
+    onAssetChange: (_uri) => {
+      server.notifyReloadAll();
+    },
+  });
+  state.runtimes.set(root, { server, watcher });
 
   return server;
 }
@@ -272,5 +275,5 @@ function findPanelForPath(workspaceRoot: string, relPath: string): PreviewPanel 
     const r = path.relative(workspaceRoot, p.documentUri.fsPath).split(path.sep).join('/');
     if (r === relPath) return p;
   }
-  return panels.values().next().value ?? null;
+  return null;
 }

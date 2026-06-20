@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 
 export interface FileWatcherDeps {
+  /** Filesystem root to watch. Defaults to all workspace folders. */
+  root?: vscode.Uri;
   /** Workspace-relative path → triggered when an HTML file changes on disk. */
   onHtmlChange: (uri: vscode.Uri) => void;
   /** Workspace-relative path → triggered when a CSS/JS asset changes on disk. */
@@ -21,8 +23,12 @@ export class FileWatcher implements vscode.Disposable {
 
   constructor(deps: FileWatcherDeps) {
     this.deps = deps;
-    this.htmlWatcher = vscode.workspace.createFileSystemWatcher('**/*.{html,htm}');
-    this.assetWatcher = vscode.workspace.createFileSystemWatcher('**/*.{css,js,mjs,jsx,ts,tsx,svg,png,jpg,jpeg,gif,webp,woff,woff2,ttf,otf}');
+    this.htmlWatcher = vscode.workspace.createFileSystemWatcher(
+      watchPattern(deps.root, '**/*.{html,htm}'),
+    );
+    this.assetWatcher = vscode.workspace.createFileSystemWatcher(
+      watchPattern(deps.root, '**/*.{css,js,mjs,jsx,ts,tsx,svg,png,jpg,jpeg,gif,webp,woff,woff2,ttf,otf}'),
+    );
     const onHtml = (uri: vscode.Uri): void => this.queueHtml(uri);
     const onAsset = (uri: vscode.Uri): void => this.queueAsset(uri);
     this.disposables.push(
@@ -86,4 +92,8 @@ export class FileWatcher implements vscode.Disposable {
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
   }
+}
+
+function watchPattern(root: vscode.Uri | undefined, pattern: string): vscode.GlobPattern {
+  return root ? new vscode.RelativePattern(root, pattern) : pattern;
 }

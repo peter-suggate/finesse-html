@@ -47,6 +47,41 @@ const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
   transition: 'opacity 100ms ease-out, color 100ms ease-out',
 };
 
+const isMac =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform);
+/** Display label for the native-click bypass modifier (Option on macOS). */
+const ALT_LABEL = isMac ? '⌥' : 'Alt';
+/** Two Option taps within this window toggle persistent interactive mode. */
+const ALT_DOUBLE_TAP_MS = 400;
+
+const INTERACT_TOGGLE_BASE_STYLE: Partial<CSSStyleDeclaration> = {
+  position: 'fixed',
+  right: '12px',
+  bottom: '12px',
+  zIndex: '2147483643',
+  padding: '4px 11px',
+  borderRadius: '999px',
+  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontSize: '11px',
+  lineHeight: '16px',
+  cursor: 'pointer',
+  userSelect: 'none',
+  boxShadow: '0 2px 8px rgba(0,0,0,0.22)',
+  transition: 'background 120ms ease-out, color 120ms ease-out',
+};
+
+const INTERACT_TOGGLE_OFF_STYLE: Partial<CSSStyleDeclaration> = {
+  color: 'rgba(244, 247, 251, 0.92)',
+  background: 'rgba(20, 24, 32, 0.78)',
+  border: '1px solid rgba(255, 255, 255, 0.10)',
+};
+
+const INTERACT_TOGGLE_ON_STYLE: Partial<CSSStyleDeclaration> = {
+  color: '#ffffff',
+  background: 'rgba(30, 111, 217, 0.95)',
+  border: '1px solid rgba(30, 111, 217, 0.95)',
+};
+
 const NATIVE_CLICK_HINT_STYLE: Partial<CSSStyleDeclaration> = {
   position: 'fixed',
   pointerEvents: 'none',
@@ -69,16 +104,52 @@ export function setupOverlay(opts: OverlayOpts): void {
   const selection = createOverlay(SELECTION_STYLE, 'finesse-selection');
   const deleteBtn = createDeleteButton();
   const nativeClickHint = createNativeClickHint();
+  const interactToggle = createInteractToggle();
   document.body.appendChild(hover);
   document.body.appendChild(selection);
   document.body.appendChild(deleteBtn);
   document.body.appendChild(nativeClickHint);
+  document.body.appendChild(interactToggle);
 
   let hoveredEl: HTMLElement | null = null;
   let focusedEl: HTMLElement | null = null;
   let selectedEl: HTMLElement | null = null;
   let lastHoverTarget: HTMLElement | null = null;
+  // Native-click bypass has two sources: holding Option (momentary) and
+  // interactive mode (persistent, toggled via the pill button, a double-tap
+  // of Option, or Escape to leave). `nativeClickBypass` is the effective
+  // OR of the two — everything downstream reads only it.
   let nativeClickBypass = false;
+  let bypassHeld = false;
+  let bypassLocked = false;
+  let lastAltTap = 0;
+
+  function refreshInteractToggle(): void {
+    interactToggle.textContent = bypassLocked ? 'Interactive mode — exit' : 'Interact';
+    Object.assign(
+      interactToggle.style,
+      nativeClickBypass ? INTERACT_TOGGLE_ON_STYLE : INTERACT_TOGGLE_OFF_STYLE,
+    );
+  }
+
+  function setBypass(): void {
+    const next = bypassHeld || bypassLocked;
+    if (next !== nativeClickBypass) {
+      nativeClickBypass = next;
+      if (nativeClickBypass) {
+        clearNavigationUi();
+        if (!bypassLocked) showNativeClickHint(lastHoverTarget);
+      } else {
+        nativeClickHint.style.display = 'none';
+      }
+    }
+    refreshInteractToggle();
+  }
+
+  function setBypassLocked(locked: boolean): void {
+    bypassLocked = locked;
+    setBypass();
+  }
 
   function rectOf(el: HTMLElement): DOMRect {
     return el.getBoundingClientRect();
@@ -212,7 +283,8 @@ export function setupOverlay(opts: OverlayOpts): void {
       hover.style.display = 'none';
       setHoveredEl(null);
       if (nativeClickBypass) deleteBtn.style.display = 'none';
-      showNativeClickHint(nativeClickBypass ? lastHoverTarget : null);
+      // While interactive mode is locked on, clicks just work — no hint needed.
+      showNativeClickHint(nativeClickBypass && !bypassLocked ? lastHoverTarget : null);
       return;
     }
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
@@ -255,6 +327,17 @@ export function setupOverlay(opts: OverlayOpts): void {
     hover.style.display = 'none';
     showSelection(null);
     session.removeElement(target);
+  });
+
+  interactToggle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  interactToggle.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setBypassLocked(!bypassLocked);
   });
 
   function editFromEvent(e: MouseEvent | PointerEvent): boolean {
@@ -338,16 +421,34 @@ export function setupOverlay(opts: OverlayOpts): void {
     true,
   );
 
+  // Chromium's default for Alt+click on a link is "download the target", not
+  // navigation. Since the bypass modifier is Option/Alt, replace that default
+  // with the plain navigation the user expects. Runs in the bubble phase so
+  // page handlers go first; respects their preventDefault.
+  function navigateInsteadOfAltDownload(e: MouseEvent, target: Element | null): void {
+    if (!e.altKey || e.defaultPrevented || e.button !== 0) return;
+    const anchor = target?.closest('a[href]');
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    if (anchor.hasAttribute('download')) return;
+    if (anchor.target && anchor.target !== '_self') return;
+    e.preventDefault();
+    window.location.assign(anchor.href);
+  }
+
   document.addEventListener('click', (e) => {
     if (session.isLocked()) return;
     const target = elementFromEventTarget(e.target);
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (target && isInOverlayUi(target)) return;
-    if (shouldAllowNativeMouseEvent(e, target)) return;
     if (nativeClickBypass) {
+      // A click between Option taps means hold-to-click usage, not a
+      // double-tap — don't let the next tap toggle interactive mode.
+      lastAltTap = 0;
+      navigateInsteadOfAltDownload(e, target);
       clearNavigationUi();
       return;
     }
+    if (shouldAllowNativeMouseEvent(e, target)) return;
     if (editFromEvent(e)) {
       e.preventDefault();
       e.stopPropagation();
@@ -362,11 +463,20 @@ export function setupOverlay(opts: OverlayOpts): void {
       session.requestCommandPalette();
       return;
     }
+    // Any non-Option key resets the double-tap tracker so Option-combos
+    // (e.g. macOS Option+letter composition) never toggle interactive mode.
+    if (e.key !== 'Alt') lastAltTap = 0;
     if (isNativeClickBypassKey(e) && !isTextEntryTarget(document.activeElement)) {
-      if (!nativeClickBypass) {
-        nativeClickBypass = true;
-        clearNavigationUi();
-        showNativeClickHint(lastHoverTarget);
+      if (!e.repeat) {
+        const now = Date.now();
+        if (now - lastAltTap < ALT_DOUBLE_TAP_MS) {
+          lastAltTap = 0;
+          setBypassLocked(!bypassLocked);
+        } else {
+          lastAltTap = now;
+        }
+        bypassHeld = true;
+        setBypass();
       }
       e.preventDefault();
       return;
@@ -435,9 +545,13 @@ export function setupOverlay(opts: OverlayOpts): void {
       }
       return;
     }
-    // Not editing: Escape clears the current selection.
+    // Not editing: Escape leaves interactive mode, else clears the selection.
     if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
+      if (bypassLocked) {
+        setBypassLocked(false);
+        return;
+      }
       session.announceElementSelection(null);
       clearNavigationUi();
       const active = document.activeElement as HTMLElement | null;
@@ -481,9 +595,12 @@ export function setupOverlay(opts: OverlayOpts): void {
   });
 
   document.addEventListener('keyup', (e) => {
-    if (!isNativeClickBypassKey(e)) return;
-    nativeClickBypass = false;
-    nativeClickHint.style.display = 'none';
+    // Loose match on purpose: if another modifier was pressed while Option
+    // was held, the strict keydown check would never see this release and
+    // the momentary bypass would stick.
+    if (e.key !== 'Alt') return;
+    bypassHeld = false;
+    setBypass();
   });
 
   document.addEventListener('focusin', (e) => {
@@ -545,9 +662,13 @@ export function setupOverlay(opts: OverlayOpts): void {
   window.addEventListener('scroll', reposition, true);
 
   window.addEventListener('blur', () => {
-    nativeClickBypass = false;
-    nativeClickHint.style.display = 'none';
+    // Only the momentary (held) bypass resets — interactive mode is an
+    // explicit toggle and survives focus changes.
+    bypassHeld = false;
+    setBypass();
   });
+
+  refreshInteractToggle();
 }
 
 /**
@@ -620,7 +741,7 @@ function isCommandPaletteShortcut(e: KeyboardEvent): boolean {
 }
 
 function isNativeClickBypassKey(e: KeyboardEvent): boolean {
-  return !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'v';
+  return !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'Alt';
 }
 
 function selectActiveBlockContents(block: HTMLElement | null): void {
@@ -653,10 +774,20 @@ function createDeleteButton(): HTMLButtonElement {
 function createNativeClickHint(): HTMLDivElement {
   const el = document.createElement('div');
   el.id = 'finesse-native-click-hint';
-  el.textContent = 'Hold V + click';
+  el.textContent = `Hold ${ALT_LABEL} + click`;
   Object.assign(el.style, NATIVE_CLICK_HINT_STYLE);
   el.setAttribute('aria-hidden', 'true');
   return el;
+}
+
+function createInteractToggle(): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.id = 'finesse-interact-toggle';
+  btn.type = 'button';
+  btn.title = `Toggle interactive mode — clicks use links and buttons natively. Double-tap ${ALT_LABEL} also toggles; hold ${ALT_LABEL} for a single click; Esc exits.`;
+  btn.setAttribute('aria-label', 'Toggle interactive mode');
+  Object.assign(btn.style, INTERACT_TOGGLE_BASE_STYLE, INTERACT_TOGGLE_OFF_STYLE);
+  return btn;
 }
 
 function createOverlay(style: Partial<CSSStyleDeclaration>, id: string): HTMLDivElement {

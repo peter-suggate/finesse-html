@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentCredentialStore } from './agent/credentials';
@@ -15,7 +16,7 @@ export interface CommandsContext {
   setPanel(key: string, panel: PreviewPanel): void;
   deletePanel(key: string): void;
   listPanels(): PreviewPanel[];
-  ensureServer(): Promise<PreviewServer>;
+  ensureServer(previewRoot: string): Promise<PreviewServer>;
   getConfig(): ResolvedConfig;
   setReactDevServerUrl(url: string): void;
 }
@@ -71,14 +72,6 @@ export function isPreviewableLanguage(languageId: string): boolean {
   return PREVIEWABLE_LANGUAGES.has(languageId);
 }
 
-function isInsideWorkspace(workspaceRoot: string, fsPath: string): boolean {
-  const rel = path.relative(workspaceRoot, fsPath);
-  if (rel === '') return true;
-  if (rel.startsWith('..')) return false;
-  if (path.isAbsolute(rel)) return false;
-  return true;
-}
-
 async function openPreview(
   extContext: vscode.ExtensionContext,
   ctx: CommandsContext,
@@ -97,40 +90,12 @@ async function openPreview(
     existing.reveal();
     return;
   }
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!workspaceRoot) {
-    const parent = path.dirname(doc.uri.fsPath);
-    const choice = await vscode.window.showErrorMessage(
-      'Finesse needs an open workspace folder — the preview server only serves files under a workspace root.',
-      'Open Containing Folder',
-    );
-    if (choice === 'Open Containing Folder') {
-      await vscode.commands.executeCommand(
-        'vscode.openFolder',
-        vscode.Uri.file(parent),
-        { forceNewWindow: false },
-      );
-    }
+  if (doc.uri.scheme !== 'file') {
+    void vscode.window.showErrorMessage('Finesse can preview local files only.');
     return;
   }
-  if (!isInsideWorkspace(workspaceRoot, doc.uri.fsPath)) {
-    const fileName = path.basename(doc.uri.fsPath);
-    const parent = path.dirname(doc.uri.fsPath);
-    const rootName = path.basename(workspaceRoot);
-    const choice = await vscode.window.showErrorMessage(
-      `Finesse can't preview "${fileName}" — it sits outside the workspace folder "${rootName}". The preview server only serves files under the workspace root.`,
-      'Open Containing Folder',
-    );
-    if (choice === 'Open Containing Folder') {
-      await vscode.commands.executeCommand(
-        'vscode.openFolder',
-        vscode.Uri.file(parent),
-        { forceNewWindow: false },
-      );
-    }
-    return;
-  }
-  const server = await ctx.ensureServer();
+  const previewRoot = resolvePreviewRoot(doc.uri);
+  const server = await ctx.ensureServer(previewRoot);
   const port = server.port;
   if (port === null) {
     void vscode.window.showErrorMessage('Preview server failed to start.');
@@ -139,11 +104,36 @@ async function openPreview(
   const panel = createPreviewPanel(doc, {
     context: extContext,
     port,
-    workspaceRoot,
+    workspaceRoot: previewRoot,
     getConfig: ctx.getConfig,
     onDispose: () => ctx.deletePanel(key),
   });
   ctx.setPanel(key, panel);
+}
+
+function resolvePreviewRoot(uri: vscode.Uri): string {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  if (workspaceFolder) return workspaceFolder.uri.fsPath;
+  return findNearestGitRoot(uri.fsPath) ?? path.dirname(uri.fsPath);
+}
+
+function findNearestGitRoot(fsPath: string): string | null {
+  let dir = path.dirname(fsPath);
+  while (true) {
+    if (hasGitMarker(dir)) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function hasGitMarker(dir: string): boolean {
+  try {
+    const stat = fs.statSync(path.join(dir, '.git'));
+    return stat.isDirectory() || stat.isFile();
+  } catch {
+    return false;
+  }
 }
 
 async function openDevServerPreview(
@@ -179,7 +169,7 @@ async function openDevServerPreview(
     .update('reactDevServerUrl', url, vscode.ConfigurationTarget.Workspace);
   ctx.setReactDevServerUrl(url);
 
-  const server = await ctx.ensureServer();
+  const server = await ctx.ensureServer(workspaceRoot);
   const port = server.port;
   if (port === null) {
     void vscode.window.showErrorMessage('Preview server failed to start.');
