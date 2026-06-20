@@ -468,12 +468,14 @@ function createPreviewPanelFromSource(
     phase: AgentRunStatus['phase'],
     text?: string,
     providerId: AgentProviderId = selectedProvider,
+    errorKind?: AgentRunStatus['errorKind'],
   ): void {
     const msg: AgentRunStatus = {
       type: 'agentRunStatus',
       providerId,
       phase,
       text,
+      errorKind,
     };
     panel.webview.postMessage(msg);
   }
@@ -569,6 +571,12 @@ function createPreviewPanelFromSource(
         } else if (msg.action === 'forgetApiKey') {
           await credentials.clearApiKey(selectedProvider);
           await postAgentConnectionState();
+        } else if (msg.action === 'connectAgent') {
+          if (isAgentProviderId(msg.providerId)) {
+            await setSelectedAgentProvider(msg.providerId, { persist: true });
+            await credentials.ensureApiKey(msg.providerId);
+            await postAgentConnectionState(msg.providerId);
+          }
         } else if (msg.action === 'selectAgentProvider') {
           if (isAgentProviderId(msg.providerId) && msg.providerId !== selectedProvider) {
             await setSelectedAgentProvider(msg.providerId, { persist: true });
@@ -1136,7 +1144,12 @@ function createPreviewPanelFromSource(
       postAgentRunStatus('done', undefined, runProvider);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      postAgentRunStatus('error', humanizeAgentError(message, runProvider), runProvider);
+      postAgentRunStatus(
+        'error',
+        humanizeAgentError(message, runProvider),
+        runProvider,
+        isAgentAuthError(message, runProvider) ? 'auth' : undefined,
+      );
       // Re-check connection — if the key is missing/invalid, the popover flips
       // back to the Connect state automatically.
       await postAgentConnectionState(runProvider);
@@ -1432,6 +1445,24 @@ function humanizeAgentError(message: string, providerId: AgentProviderId): strin
     return 'Claude Code is not authenticated. In a terminal run `claude` then `/login` to use your subscription — or paste an ANTHROPIC_API_KEY into the Ask Agent panel.';
   }
   return message;
+}
+
+function isAgentAuthError(message: string, providerId: AgentProviderId): boolean {
+  const lower = message.toLowerCase();
+  if (providerId === 'cursor') {
+    return (
+      message.includes('CURSOR_API_KEY') ||
+      lower.includes('api key') ||
+      lower.includes('not configured')
+    );
+  }
+  return (
+    lower.includes('not authenticated') ||
+    lower.includes('authentication_failed') ||
+    lower.includes('invalid authentication') ||
+    lower.includes('login') ||
+    lower.includes('api key')
+  );
 }
 
 interface PanelInit {

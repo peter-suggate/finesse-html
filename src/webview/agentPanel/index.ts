@@ -32,6 +32,7 @@ export interface AgentPanelState {
   runLog: string;
   /** Last error message from a failed run. Cleared when a new run starts. */
   runError?: string;
+  runErrorKind?: 'auth';
 }
 
 export interface AgentPanelActions {
@@ -39,6 +40,7 @@ export interface AgentPanelActions {
   onOpenClaudeDocs: () => void;
   onSaveApiKey: (value: string) => void;
   onForgetApiKey: () => void;
+  onConnectProvider: (providerId: AgentProviderId) => void;
   onSelectProvider: (providerId: AgentProviderId) => void;
   onChangeModel: () => void;
   onRunAgent: (prompt: string) => void;
@@ -48,7 +50,7 @@ export interface AgentPanelController {
   setState(patch: Partial<AgentPanelState>): void;
   appendLog(text: string): void;
   clearLog(): void;
-  setError(text: string | undefined): void;
+  setError(text: string | undefined, kind?: AgentPanelState['runErrorKind']): void;
   destroy(): void;
 }
 
@@ -232,6 +234,17 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     if (!state.agentRunning) {
       const actions = document.createElement('div');
       actions.className = 'ap-turn-actions';
+      if (state.runErrorKind === 'auth') {
+        const connect = document.createElement('button');
+        connect.type = 'button';
+        connect.className = 'ap-btn-primary';
+        connect.textContent =
+          state.providerId === 'claude-code' ? 'Re-login' : 'Reconnect';
+        connect.addEventListener('click', () => {
+          opts.actions.onConnectProvider(state.providerId);
+        });
+        actions.appendChild(connect);
+      }
       if (state.runError && lastSubmittedPrompt) {
         const retry = document.createElement('button');
         retry.type = 'button';
@@ -596,17 +609,22 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   }
 
   function appendLog(text: string): void {
-    state = { ...state, runLog: (state.runLog + text).slice(-MAX_LOG_CHARS) };
+    state = {
+      ...state,
+      runLog: (state.runLog + text).slice(-MAX_LOG_CHARS),
+      runError: undefined,
+      runErrorKind: undefined,
+    };
     render();
   }
 
   function clearLog(): void {
-    state = { ...state, runLog: '', runError: undefined };
+    state = { ...state, runLog: '', runError: undefined, runErrorKind: undefined };
     render();
   }
 
-  function setError(text: string | undefined): void {
-    state = { ...state, runError: text };
+  function setError(text: string | undefined, kind?: AgentPanelState['runErrorKind']): void {
+    state = { ...state, runError: text, runErrorKind: kind };
     render();
   }
 

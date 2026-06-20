@@ -193,6 +193,8 @@ function bootIframe(init: InitData): void {
         onOpenClaudeDocs: () => post({ type: '__webview_action', action: 'openClaudeDocs' }),
         onSaveApiKey: (value) => post({ type: '__webview_action', action: 'saveApiKey', value }),
         onForgetApiKey: () => post({ type: '__webview_action', action: 'forgetApiKey' }),
+        onConnectProvider: (providerId) =>
+          post({ type: '__webview_action', action: 'connectAgent', providerId }),
         onChangeModel: () => post({ type: '__webview_action', action: 'changeAgentModel' }),
         onSelectProvider: (providerId) => {
           currentAgentProvider = providerId;
@@ -202,6 +204,7 @@ function bootIframe(init: InitData): void {
             connectionSource: undefined,
             runLog: '',
             runError: undefined,
+            runErrorKind: undefined,
           });
           post({ type: '__webview_action', action: 'selectAgentProvider', providerId });
         },
@@ -358,7 +361,7 @@ function bootIframe(init: InitData): void {
             agentPanel?.appendLog('\n— done —\n');
             break;
           case 'error':
-            agentPanel?.setError(data.text ?? 'Agent run failed.');
+            agentPanel?.setError(data.text ?? 'Agent run failed.', data.errorKind);
             break;
         }
         break;

@@ -181,6 +181,7 @@ export type AgentRunStatus = {
    */
   phase: 'starting' | 'status' | 'output' | 'done' | 'error';
   text?: string;
+  errorKind?: 'auth';
 };
 
 export type HostMessage =
@@ -520,6 +521,7 @@ export type WebviewActionMessage =
   | { type: '__webview_action'; action: 'openClaudeDocs' }
   | { type: '__webview_action'; action: 'saveApiKey'; value: string }
   | { type: '__webview_action'; action: 'forgetApiKey' }
+  | { type: '__webview_action'; action: 'connectAgent'; providerId: AgentProviderId }
   | { type: '__webview_action'; action: 'selectAgentProvider'; providerId: AgentProviderId }
   | { type: '__webview_action'; action: 'changeAgentModel' }
   | { type: '__webview_action'; action: 'runAgent'; value: string; providerId: AgentProviderId };

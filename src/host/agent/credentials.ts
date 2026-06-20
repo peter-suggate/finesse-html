@@ -33,8 +33,8 @@ const CLAUDE_SETUP_TEXT = [
   '',
   'To authenticate the SDK with your subscription:',
   '1. Install Claude Code from https://claude.com/code (if not already).',
-  '2. In a terminal, run `claude`.',
-  '3. Run `/login` and complete the browser sign-in.',
+  '2. Start the Claude Code login flow from Finesse.',
+  '3. Complete the browser sign-in.',
   '',
   'Alternatively, paste an ANTHROPIC_API_KEY to use API-key auth instead.',
 ].join('\n');
@@ -175,7 +175,7 @@ export class AgentCredentialStore {
       const choice = await vscode.window.showInformationMessage(
         CLAUDE_SETUP_TEXT,
         { modal: true },
-        'Use Subscription',
+        'Open Login Terminal',
         'Paste API Key',
         'Open Claude Docs',
       );
@@ -184,9 +184,10 @@ export class AgentCredentialStore {
         await vscode.env.openExternal(vscode.Uri.parse(CLAUDE_DOCS_URL));
         continue;
       }
-      if (choice === 'Use Subscription') {
+      if (choice === 'Open Login Terminal') {
+        this.openClaudeLoginTerminal();
         void vscode.window.showInformationMessage(
-          'In a terminal, run `claude` then `/login`. Finesse will pick up that login automatically.',
+          'Complete the Claude Code login in the terminal, then retry the agent run.',
         );
         return undefined;
       }
@@ -204,5 +205,12 @@ export class AgentCredentialStore {
       void vscode.window.showInformationMessage('Claude Code is connected for Finesse.');
       return { value: apiKey.trim(), source: 'prompt' };
     }
+  }
+
+  private openClaudeLoginTerminal(): void {
+    const terminal = vscode.window.createTerminal({ name: 'Claude Code Login' });
+    terminal.show(false);
+    terminal.sendText('claude', true);
+    terminal.sendText('/login', true);
   }
 }

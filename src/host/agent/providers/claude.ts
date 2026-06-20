@@ -93,6 +93,7 @@ function handleAssistant(message: unknown, sink: AgentRunSink): void {
     error?: string;
   };
   if (m.error) {
+    if (isClaudeAuthText(m.error)) throw new Error(m.error);
     sink.status(`Assistant error: ${m.error}`);
   }
   const content = m.message?.content;
@@ -145,24 +146,30 @@ function handleResult(message: unknown, sink: AgentRunSink): void {
 
 function normalizeClaudeError(err: unknown): Error {
   const raw = err instanceof Error ? err : new Error(String(err));
-  const text = raw.message.toLowerCase();
-  if (
-    text.includes('authentication_failed') ||
-    text.includes('not authenticated') ||
-    text.includes('unauthorized') ||
-    text.includes('login') ||
-    text.includes('api key')
-  ) {
+  if (isClaudeAuthText(raw.message)) {
     return new Error(
       'Claude Code is not authenticated. Open a terminal, run `claude`, then `/login` to sign in with your subscription — or set ANTHROPIC_API_KEY.',
     );
   }
+  const text = raw.message.toLowerCase();
   if (text.includes('claude code') && text.includes('binary')) {
     return new Error(
       'Could not launch the Claude Code binary bundled with the SDK. Install Claude Code from https://claude.com/code and try again.',
     );
   }
   return raw;
+}
+
+function isClaudeAuthText(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes('authentication_failed') ||
+    text.includes('invalid authentication') ||
+    text.includes('not authenticated') ||
+    text.includes('unauthorized') ||
+    text.includes('login') ||
+    text.includes('api key')
+  );
 }
 
 export function buildClaudeElementPrompt(request: AgentElementRequest): string {
