@@ -522,6 +522,12 @@ test('native-click bypass allows native clicks on interactive preview elements',
       document.querySelector('#jump-link').addEventListener('click', (event) => {
         document.body.dataset.jump = event.defaultPrevented ? 'prevented' : 'clicked';
       });
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Shift') event.stopImmediatePropagation();
+      });
+      document.addEventListener('keyup', (event) => {
+        if (event.key === 'Shift') event.stopImmediatePropagation();
+      });
     </script>
   </body>
 </html>`,
@@ -531,9 +537,30 @@ test('native-click bypass allows native clicks on interactive preview elements',
     await waitForMessages(page, 'ready', 1);
 
     await page.locator('#accordion summary span').hover();
+    await expect(page.locator('#finesse-hover')).toBeVisible();
     await expect(page.locator('#finesse-native-click-hint')).toBeVisible();
-    await expect(page.locator('#finesse-native-click-hint')).toContainText(/⌥|Alt/);
+    await expect(page.locator('#finesse-native-click-hint')).toContainText(/⇧|Shift/);
     await expect(page.locator('#finesse-native-click-hint')).toContainText('click');
+    await page.evaluate(() => {
+      window.postMessage({ type: 'chromeModifierKey', key: 'Shift', state: 'down' }, '*');
+    });
+    await expect(page.locator('#finesse-hover')).toBeHidden();
+    await expect(page.locator('#finesse-selection')).toBeHidden();
+    await expect(page.locator('#finesse-delete')).toBeHidden();
+    await expect(page.locator('#finesse-native-click-hint')).toBeHidden();
+    await page.evaluate(() => {
+      window.postMessage({ type: 'chromeModifierKey', key: 'Shift', state: 'up' }, '*');
+    });
+    await page.waitForTimeout(450);
+
+    await page.locator('#accordion summary span').hover();
+    await expect(page.locator('#finesse-hover')).toBeVisible();
+    await page.keyboard.down('Shift');
+    await expect(page.locator('#finesse-hover')).toBeHidden();
+    await expect(page.locator('#finesse-selection')).toBeHidden();
+    await expect(page.locator('#finesse-delete')).toBeHidden();
+    await expect(page.locator('#finesse-native-click-hint')).toBeHidden();
+    await page.keyboard.up('Shift');
 
     await page.locator('#low-button').hover();
     const lowHintPosition = await page.evaluate(() => {
@@ -564,15 +591,15 @@ test('native-click bypass allows native clicks on interactive preview elements',
     await page.locator('#readonly-accordion summary').click();
     await expect(page.locator('#readonly-accordion')).not.toHaveAttribute('open', '');
 
-    await page.keyboard.down('Alt');
+    await page.keyboard.down('Shift');
     await page.locator('#accordion summary span').click();
-    await page.keyboard.up('Alt');
+    await page.keyboard.up('Shift');
     await expect(page.locator('#accordion')).toHaveAttribute('open', '');
     await expect(page.locator('#accordion summary')).not.toHaveAttribute('contenteditable', 'true');
 
-    await page.keyboard.down('Alt');
+    await page.keyboard.down('Shift');
     await page.locator('#readonly-accordion summary').click();
-    await page.keyboard.up('Alt');
+    await page.keyboard.up('Shift');
     await expect(page.locator('#readonly-accordion')).toHaveAttribute('open', '');
 
     await page.locator('#phase-button span').click();
@@ -580,25 +607,25 @@ test('native-click bypass allows native clicks on interactive preview elements',
     await expect(page.locator('#phase-button span')).toHaveAttribute('contenteditable', 'true');
     await page.keyboard.press('Escape');
 
-    // Option+click as a single gesture (modifier on the click itself) also
+    // Shift+click as a single gesture (modifier on the click itself) also
     // passes the click through to the page.
-    await page.locator('#phase-button span').click({ modifiers: ['Alt'] });
+    await page.locator('#phase-button span').click({ modifiers: ['Shift'] });
     await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');
     await expect(page.locator('#phase-button span')).not.toHaveAttribute('contenteditable', 'true');
 
-    await page.keyboard.down('Alt');
+    await page.keyboard.down('Shift');
     await page.locator('#jump-link span').click();
-    await page.keyboard.up('Alt');
+    await page.keyboard.up('Shift');
     await expect(page.locator('body')).toHaveAttribute('data-jump', 'clicked');
     await expect(page.locator('#copy')).not.toHaveAttribute('contenteditable', 'true');
 
-    // Double-tap Option locks interactive mode: clicks pass through with no
+    // Double-tap Shift locks interactive mode: clicks pass through with no
     // key held. Escape exits it.
     await page.evaluate(() => {
       delete document.body.dataset.phase;
     });
-    await page.keyboard.press('Alt');
-    await page.keyboard.press('Alt');
+    await page.keyboard.press('Shift');
+    await page.keyboard.press('Shift');
     await expect(page.locator('#finesse-interact-toggle')).toContainText('exit');
     await page.locator('#phase-button span').click();
     await expect(page.locator('body')).toHaveAttribute('data-phase', '1b');

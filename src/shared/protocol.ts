@@ -481,7 +481,23 @@ export type PanelSelectElement = {
   elementId: number;
 };
 
-export type ChromeIframeMessage = PanelStyleEdit | PanelCssEdit | PanelSelectElement;
+/**
+ * Chrome forwards modifier key state to the iframe. This covers the common
+ * webview focus case where hover/mousemove events happen inside the preview
+ * iframe, but the first keydown still lands in the surrounding webview.
+ */
+export type ChromeModifierKey = {
+  type: 'chromeModifierKey';
+  key: 'Shift';
+  state: 'down' | 'up';
+  repeat?: boolean;
+};
+
+export type ChromeIframeMessage =
+  | PanelStyleEdit
+  | PanelCssEdit
+  | PanelSelectElement
+  | ChromeModifierKey;
 
 /** Everything the iframe's window-message listener may receive. */
 export type IframeInboundMessage = HostMessage | ChromeIframeMessage;

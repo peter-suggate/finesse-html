@@ -49,10 +49,10 @@ const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
 
 const isMac =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform);
-/** Display label for the native-click bypass modifier (Option on macOS). */
-const ALT_LABEL = isMac ? '⌥' : 'Alt';
-/** Two Option taps within this window toggle persistent interactive mode. */
-const ALT_DOUBLE_TAP_MS = 400;
+/** Display label for the native-click bypass modifier. */
+const BYPASS_MODIFIER_LABEL = isMac ? '⇧' : 'Shift';
+/** Two modifier taps within this window toggle persistent interactive mode. */
+const BYPASS_DOUBLE_TAP_MS = 400;
 
 const INTERACT_TOGGLE_BASE_STYLE: Partial<CSSStyleDeclaration> = {
   position: 'fixed',
@@ -115,14 +115,14 @@ export function setupOverlay(opts: OverlayOpts): void {
   let focusedEl: HTMLElement | null = null;
   let selectedEl: HTMLElement | null = null;
   let lastHoverTarget: HTMLElement | null = null;
-  // Native-click bypass has two sources: holding Option (momentary) and
+  // Native-click bypass has two sources: holding Shift (momentary) and
   // interactive mode (persistent, toggled via the pill button, a double-tap
-  // of Option, or Escape to leave). `nativeClickBypass` is the effective
+  // of Shift, or Escape to leave). `nativeClickBypass` is the effective
   // OR of the two — everything downstream reads only it.
   let nativeClickBypass = false;
   let bypassHeld = false;
   let bypassLocked = false;
-  let lastAltTap = 0;
+  let lastBypassTap = 0;
 
   function refreshInteractToggle(): void {
     interactToggle.textContent = bypassLocked ? 'Interactive mode — exit' : 'Interact';
@@ -138,7 +138,6 @@ export function setupOverlay(opts: OverlayOpts): void {
       nativeClickBypass = next;
       if (nativeClickBypass) {
         clearNavigationUi();
-        if (!bypassLocked) showNativeClickHint(lastHoverTarget);
       } else {
         nativeClickHint.style.display = 'none';
       }
@@ -421,12 +420,12 @@ export function setupOverlay(opts: OverlayOpts): void {
     true,
   );
 
-  // Chromium's default for Alt+click on a link is "download the target", not
-  // navigation. Since the bypass modifier is Option/Alt, replace that default
-  // with the plain navigation the user expects. Runs in the bubble phase so
-  // page handlers go first; respects their preventDefault.
-  function navigateInsteadOfAltDownload(e: MouseEvent, target: Element | null): void {
-    if (!e.altKey || e.defaultPrevented || e.button !== 0) return;
+  // Browsers attach special meanings to modified link clicks. The bypass
+  // modifier should mean "plain page click", so replace Shift+link defaults
+  // with normal navigation. Runs in the bubble phase so page handlers go
+  // first; respects their preventDefault.
+  function navigateInsteadOfModifiedLinkDefault(e: MouseEvent, target: Element | null): void {
+    if (!e.shiftKey || e.defaultPrevented || e.button !== 0) return;
     const anchor = target?.closest('a[href]');
     if (!(anchor instanceof HTMLAnchorElement)) return;
     if (anchor.hasAttribute('download')) return;
@@ -441,10 +440,10 @@ export function setupOverlay(opts: OverlayOpts): void {
     if (target && (target === deleteBtn || deleteBtn.contains(target))) return;
     if (target && isInOverlayUi(target)) return;
     if (nativeClickBypass) {
-      // A click between Option taps means hold-to-click usage, not a
+      // A click between modifier taps means hold-to-click usage, not a
       // double-tap — don't let the next tap toggle interactive mode.
-      lastAltTap = 0;
-      navigateInsteadOfAltDownload(e, target);
+      lastBypassTap = 0;
+      navigateInsteadOfModifiedLinkDefault(e, target);
       clearNavigationUi();
       return;
     }
@@ -456,29 +455,56 @@ export function setupOverlay(opts: OverlayOpts): void {
     }
   });
 
+  function applyBypassModifierDown(repeat = false): void {
+    if (!repeat && !bypassHeld) {
+      const now = Date.now();
+      if (now - lastBypassTap < BYPASS_DOUBLE_TAP_MS) {
+        lastBypassTap = 0;
+        setBypassLocked(!bypassLocked);
+      } else {
+        lastBypassTap = now;
+      }
+      bypassHeld = true;
+      setBypass();
+    }
+  }
+
+  function applyBypassModifierUp(): void {
+    bypassHeld = false;
+    setBypass();
+  }
+
+  function onBypassModifierKeyDown(e: KeyboardEvent): void {
+    // Run in capture phase so page key handlers cannot leave Finesse
+    // highlights visible while the bypass modifier is held.
+    if (e.key !== 'Shift') lastBypassTap = 0;
+    if (!isNativeClickBypassKey(e) || isTextEntryTarget(document.activeElement)) return;
+    applyBypassModifierDown(e.repeat);
+    e.preventDefault();
+  }
+
+  function onBypassModifierKeyUp(e: KeyboardEvent): void {
+    // Loose match on purpose: if another modifier was pressed while Shift
+    // was held, the strict keydown check would never see this release and
+    // the momentary bypass would stick.
+    if (e.key !== 'Shift') return;
+    applyBypassModifierUp();
+  }
+
+  document.addEventListener('keydown', onBypassModifierKeyDown, true);
+  window.addEventListener('message', (event: MessageEvent) => {
+    const data = event.data as { type?: unknown; key?: unknown; state?: unknown; repeat?: unknown };
+    if (data?.type !== 'chromeModifierKey' || data.key !== 'Shift') return;
+    if (isTextEntryTarget(document.activeElement)) return;
+    if (data.state === 'down') applyBypassModifierDown(data.repeat === true);
+    else if (data.state === 'up') applyBypassModifierUp();
+  });
+
   document.addEventListener('keydown', (e) => {
     if (isCommandPaletteShortcut(e)) {
       e.preventDefault();
       e.stopPropagation();
       session.requestCommandPalette();
-      return;
-    }
-    // Any non-Option key resets the double-tap tracker so Option-combos
-    // (e.g. macOS Option+letter composition) never toggle interactive mode.
-    if (e.key !== 'Alt') lastAltTap = 0;
-    if (isNativeClickBypassKey(e) && !isTextEntryTarget(document.activeElement)) {
-      if (!e.repeat) {
-        const now = Date.now();
-        if (now - lastAltTap < ALT_DOUBLE_TAP_MS) {
-          lastAltTap = 0;
-          setBypassLocked(!bypassLocked);
-        } else {
-          lastAltTap = now;
-        }
-        bypassHeld = true;
-        setBypass();
-      }
-      e.preventDefault();
       return;
     }
     // Cmd/Ctrl+S: commit any active edit, then ask host to save.
@@ -594,14 +620,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     }
   });
 
-  document.addEventListener('keyup', (e) => {
-    // Loose match on purpose: if another modifier was pressed while Option
-    // was held, the strict keydown check would never see this release and
-    // the momentary bypass would stick.
-    if (e.key !== 'Alt') return;
-    bypassHeld = false;
-    setBypass();
-  });
+  document.addEventListener('keyup', onBypassModifierKeyUp, true);
 
   document.addEventListener('focusin', (e) => {
     if (session.hasActiveBlock() || nativeClickBypass) return;
@@ -741,7 +760,7 @@ function isCommandPaletteShortcut(e: KeyboardEvent): boolean {
 }
 
 function isNativeClickBypassKey(e: KeyboardEvent): boolean {
-  return !e.metaKey && !e.ctrlKey && !e.shiftKey && e.key === 'Alt';
+  return !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Shift';
 }
 
 function selectActiveBlockContents(block: HTMLElement | null): void {
@@ -774,7 +793,7 @@ function createDeleteButton(): HTMLButtonElement {
 function createNativeClickHint(): HTMLDivElement {
   const el = document.createElement('div');
   el.id = 'finesse-native-click-hint';
-  el.textContent = `Hold ${ALT_LABEL} + click`;
+  el.textContent = `Hold ${BYPASS_MODIFIER_LABEL} + click`;
   Object.assign(el.style, NATIVE_CLICK_HINT_STYLE);
   el.setAttribute('aria-hidden', 'true');
   return el;
@@ -784,7 +803,7 @@ function createInteractToggle(): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.id = 'finesse-interact-toggle';
   btn.type = 'button';
-  btn.title = `Toggle interactive mode — clicks use links and buttons natively. Double-tap ${ALT_LABEL} also toggles; hold ${ALT_LABEL} for a single click; Esc exits.`;
+  btn.title = `Toggle interactive mode — clicks use links and buttons natively. Double-tap ${BYPASS_MODIFIER_LABEL} also toggles; hold ${BYPASS_MODIFIER_LABEL} for a single click; Esc exits.`;
   btn.setAttribute('aria-label', 'Toggle interactive mode');
   Object.assign(btn.style, INTERACT_TOGGLE_BASE_STYLE, INTERACT_TOGGLE_OFF_STYLE);
   return btn;

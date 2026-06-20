@@ -236,6 +236,16 @@ function bootIframe(init: InitData): void {
     }
   }
 
+  function forwardBypassModifier(e: KeyboardEvent, state: 'down' | 'up'): void {
+    if (e.key !== 'Shift') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTextEntryTarget(document.activeElement)) return;
+    postToIframe({ type: 'chromeModifierKey', key: 'Shift', state, repeat: e.repeat });
+  }
+
+  window.addEventListener('keydown', (e) => forwardBypassModifier(e, 'down'), true);
+  window.addEventListener('keyup', (e) => forwardBypassModifier(e, 'up'), true);
+
   function relayToIframe(msg: HostMessage): void {
     postToIframe(msg);
   }
@@ -364,6 +374,12 @@ function previewProbeDetail(html: string): string {
     .replace(/\s+/g, ' ')
     .trim();
   return text.slice(0, 400);
+}
+
+function isTextEntryTarget(target: Element | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return target.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select';
 }
 
 window.addEventListener(

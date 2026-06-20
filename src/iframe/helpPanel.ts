@@ -1,7 +1,7 @@
 /**
  * Fixed help panel pinned to the bottom-left of the preview.
  *
- * Lists the canonical interactions (click to edit, ⌥+click to use natively,
+ * Lists the canonical interactions (click to edit, Shift+click to use natively,
  * Delete to remove, ⌘S/⌘Z, etc.) at a glance. Fades out of the way when the
  * user's pointer approaches it, and hides entirely while an edit session is
  * active so it doesn't compete with the format toolbar.
@@ -23,7 +23,6 @@ const isMac =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform);
 const MOD = isMac ? '⌘' : 'Ctrl';
 const SHIFT = isMac ? '⇧' : 'Shift';
-const ALT = isMac ? '⌥' : 'Alt';
 
 interface Row {
   keys: string[];
@@ -32,8 +31,8 @@ interface Row {
 
 const ROWS: readonly Row[] = [
   { keys: ['Click'], label: 'Edit text' },
-  { keys: [ALT, 'Click'], label: 'Use link / button' },
-  { keys: [ALT, ALT], label: 'Toggle interactive' },
+  { keys: [SHIFT, 'Click'], label: 'Use link / button' },
+  { keys: [SHIFT, SHIFT], label: 'Toggle interactive' },
   { keys: ['Tab'], label: 'Next element' },
   { keys: ['Enter'], label: 'Edit focused' },
   { keys: ['Del'], label: 'Remove' },
