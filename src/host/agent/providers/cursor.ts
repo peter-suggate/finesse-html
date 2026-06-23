@@ -47,10 +47,18 @@ export class CursorAgentProvider implements AgentProvider {
     try {
       const run = await agent.send(prompt);
       sink.status(`Run ${run.id} started`);
+      // The Cursor SDK exposes no run-level abort. Best effort: stop consuming
+      // the stream once the thread aborts so the host frees the active slot.
+      // The remote run may keep going server-side; its late output is dropped
+      // by the engine's epoch guard.
       for await (const event of run.stream()) {
+        if (request.signal?.aborted) {
+          throw makeAbortError();
+        }
         const text = assistantTextFromEvent(event);
         if (text) sink.output(text);
       }
+      if (request.signal?.aborted) throw makeAbortError();
       const result = await run.wait();
       sink.status(`Run ${result.status}${result.durationMs ? ` in ${result.durationMs}ms` : ''}`);
       if (result.result) sink.output(`\n${result.result}\n`);
@@ -135,6 +143,12 @@ Current source:
 ${page.source}
 \`\`\`
 `;
+}
+
+function makeAbortError(): Error {
+  const err = new Error('Cursor run aborted.');
+  err.name = 'AbortError';
+  return err;
 }
 
 function assistantTextFromEvent(event: unknown): string {

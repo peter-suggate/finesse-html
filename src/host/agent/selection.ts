@@ -21,6 +21,7 @@ export function buildElementSourceReference(
   if (!element) {
     throw new Error('The selected element no longer exists. Select it again.');
   }
+  const sourcePath = element.sourcePath ?? relativePath;
   const source = document.getText();
   const selectedSource = source.slice(element.startOffset, element.endOffset);
   const start = positionAt(document, element.startOffset);
@@ -28,7 +29,7 @@ export function buildElementSourceReference(
   const sourceHash = createHash('sha256').update(selectedSource).digest('hex');
   const token = [
     'finesse-selection',
-    relativePath,
+    sourcePath,
     offsetMap.documentVersion,
     element.startOffset,
     element.endOffset,
@@ -37,7 +38,7 @@ export function buildElementSourceReference(
 
   return {
     token,
-    workspaceRelativePath: relativePath,
+    workspaceRelativePath: sourcePath,
     documentVersion: offsetMap.documentVersion,
     tagName: element.tagName,
     elementId: selection.elementId,

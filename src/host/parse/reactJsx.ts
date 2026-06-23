@@ -71,6 +71,7 @@ interface SourceTextRange {
 
 export function buildReactOffsetMap(opts: BuildReactOffsetMapOptions): OffsetMap {
   const sourceCache = new Map<string, SourceIndex | null>();
+  const resolveSourcePath = createSourcePathResolver(opts);
   const locCounts = new Map<string, number>();
   for (const d of opts.discoveries) {
     locCounts.set(d.loc, (locCounts.get(d.loc) ?? 0) + 1);
@@ -88,7 +89,7 @@ export function buildReactOffsetMap(opts: BuildReactOffsetMapOptions): OffsetMap
   let nextNodeId = 0;
 
   for (const d of opts.discoveries) {
-    const parsed = parseLocValue(d.loc, opts.workspaceRoot);
+    const parsed = parseLocValue(d.loc, opts.workspaceRoot, resolveSourcePath);
     if (!parsed) {
       lock(d.elementId, 'missing-source-file');
       continue;
@@ -340,22 +341,235 @@ function walk(node: AnyNode, visit: (node: AnyNode) => void): void {
   }
 }
 
-function parseLocValue(value: string, workspaceRoot: string): { sourcePath: string; locKey: string } | null {
+type SourcePathResolver = (rawPath: string) => string | null;
+
+interface SourceRootCandidate {
+  prefix: string;
+  markerScore: number;
+  matchCount: number;
+}
+
+const REACT_ROOT_CONFIGS = new Set([
+  'next.config.js',
+  'next.config.mjs',
+  'next.config.cjs',
+  'next.config.ts',
+  'next.config.mts',
+  'next.config.cts',
+  'vite.config.js',
+  'vite.config.mjs',
+  'vite.config.cjs',
+  'vite.config.ts',
+  'vite.config.mts',
+  'vite.config.cts',
+]);
+
+const SKIP_ROOT_DIRS = new Set([
+  '.cache',
+  '.git',
+  '.next',
+  '.turbo',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+  'out',
+]);
+
+function createSourcePathResolver(opts: BuildReactOffsetMapOptions): SourcePathResolver {
+  const parsedPaths = new Set<string>();
+  for (const d of opts.discoveries) {
+    const parsed = splitLocValue(d.loc);
+    if (parsed && !path.isAbsolute(parsed.rawPath)) {
+      const normalized = normalizeRelativePath(parsed.rawPath);
+      if (normalized) parsedPaths.add(normalized);
+    }
+  }
+
+  let rootCandidates: SourceRootCandidate[] | null = null;
+  const getRootCandidates = (): SourceRootCandidate[] => {
+    rootCandidates ??= detectReactSourceRoots(opts.workspaceRoot, parsedPaths);
+    return rootCandidates;
+  };
+  const cache = new Map<string, string | null>();
+  return (rawPath: string): string | null => {
+    const cached = cache.get(rawPath);
+    if (cached !== undefined) return cached;
+    const resolved = resolveSourcePath(rawPath, opts, getRootCandidates);
+    cache.set(rawPath, resolved);
+    return resolved;
+  };
+}
+
+function resolveSourcePath(
+  rawPath: string,
+  opts: BuildReactOffsetMapOptions,
+  getRoots: () => readonly SourceRootCandidate[],
+): string | null {
+  if (path.isAbsolute(rawPath)) {
+    const rel = workspaceRelativePath(opts.workspaceRoot, rawPath);
+    return rel && isReadableSourcePath(rel, opts) ? rel : null;
+  }
+
+  const normalized = normalizeRelativePath(rawPath);
+  if (!normalized) return null;
+
+  if (isReadableSourcePath(normalized, opts)) return normalized;
+
+  const matches = getRoots()
+    .filter((root) => root.prefix !== '')
+    .map((root) => ({
+      root,
+      sourcePath: joinWebPath(root.prefix, normalized),
+    }))
+    .filter((candidate) => isReadableSourcePath(candidate.sourcePath, opts))
+    .sort((a, b) => {
+      const byMatches = b.root.matchCount - a.root.matchCount;
+      if (byMatches !== 0) return byMatches;
+      const byMarkers = b.root.markerScore - a.root.markerScore;
+      if (byMarkers !== 0) return byMarkers;
+      return a.root.prefix.localeCompare(b.root.prefix);
+    });
+
+  if (matches.length === 0) return null;
+  const best = matches[0];
+  const tied = matches.filter(
+    (candidate) =>
+      candidate.root.matchCount === best.root.matchCount &&
+      candidate.root.markerScore === best.root.markerScore,
+  );
+  return tied.length === 1 ? best.sourcePath : null;
+}
+
+function detectReactSourceRoots(
+  workspaceRoot: string,
+  relativeSourcePaths: ReadonlySet<string>,
+): SourceRootCandidate[] {
+  const roots: SourceRootCandidate[] = [
+    {
+      prefix: '',
+      markerScore: 0,
+      matchCount: countExistingSources(workspaceRoot, relativeSourcePaths),
+    },
+  ];
+
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: workspaceRoot, depth: 0 }];
+  const maxDepth = 4;
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.depth >= maxDepth) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current.dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || SKIP_ROOT_DIRS.has(entry.name)) continue;
+      const absPath = path.join(current.dir, entry.name);
+      const prefix = workspaceRelativePath(workspaceRoot, absPath);
+      if (!prefix) continue;
+      const markerScore = reactRootMarkerScore(absPath);
+      if (markerScore > 0) {
+        roots.push({
+          prefix,
+          markerScore,
+          matchCount: countExistingSources(absPath, relativeSourcePaths),
+        });
+      }
+      queue.push({ dir: absPath, depth: current.depth + 1 });
+    }
+  }
+
+  return roots;
+}
+
+function reactRootMarkerScore(dir: string): number {
+  let score = 0;
+  for (const config of REACT_ROOT_CONFIGS) {
+    if (fileExists(path.join(dir, config))) score += 8;
+  }
+
+  const pkgPath = path.join(dir, 'package.json');
+  if (!fileExists(pkgPath)) return score;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as {
+      dependencies?: Record<string, unknown>;
+      devDependencies?: Record<string, unknown>;
+    };
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    if ('next' in deps) score += 6;
+    if ('@vitejs/plugin-react' in deps || 'vite' in deps) score += 4;
+    if ('react' in deps || 'react-dom' in deps) score += 2;
+    if ('jsx-loc-plugin' in deps) score += 2;
+  } catch {
+    // Ignore malformed package metadata; config-file markers still count.
+  }
+  return score;
+}
+
+function countExistingSources(root: string, relativeSourcePaths: ReadonlySet<string>): number {
+  let count = 0;
+  for (const rel of relativeSourcePaths) {
+    if (fileExists(path.resolve(root, rel))) count++;
+  }
+  return count;
+}
+
+function isReadableSourcePath(sourcePath: string, opts: BuildReactOffsetMapOptions): boolean {
+  if (sourcePath === opts.activeDocumentPath) return true;
+  if (opts.readOpenDocument?.(sourcePath)) return true;
+  return fileExists(path.resolve(opts.workspaceRoot, sourcePath));
+}
+
+function fileExists(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function joinWebPath(prefix: string, relPath: string): string {
+  return `${prefix.replace(/\/+$/, '')}/${relPath.replace(/^\/+/, '')}`;
+}
+
+function normalizeRelativePath(rawPath: string): string | null {
+  const normalized = path.posix.normalize(rawPath.replace(/\\/g, '/')).replace(/^\/+/, '');
+  if (!normalized || normalized === '.' || normalized.startsWith('../') || normalized === '..') {
+    return null;
+  }
+  return normalized;
+}
+
+function workspaceRelativePath(workspaceRoot: string, fsPath: string): string | null {
+  const rel = path.relative(workspaceRoot, fsPath).split(path.sep).join('/');
+  if (!rel || rel.startsWith('../') || rel === '..' || path.isAbsolute(rel)) return null;
+  return rel;
+}
+
+function splitLocValue(value: string): { rawPath: string; line: number; column: number } | null {
   const match = /^(.*):(\d+):(\d+)$/.exec(value);
   if (!match) return null;
   const rawPath = match[1];
   const line = Number.parseInt(match[2], 10);
   const column = Number.parseInt(match[3], 10);
   if (!Number.isFinite(line) || !Number.isFinite(column)) return null;
-  let sourcePath = rawPath.replace(/\\/g, '/');
-  if (path.isAbsolute(sourcePath)) {
-    const rel = path.relative(workspaceRoot, sourcePath).split(path.sep).join('/');
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
-    sourcePath = rel;
-  }
+  return { rawPath, line, column };
+}
+
+function parseLocValue(
+  value: string,
+  workspaceRoot: string,
+  resolveSourcePath: SourcePathResolver,
+): { sourcePath: string; locKey: string } | null {
+  const parsed = splitLocValue(value);
+  if (!parsed) return null;
+  const sourcePath = resolveSourcePath(parsed.rawPath);
+  if (!sourcePath) return null;
   const abs = path.resolve(workspaceRoot, sourcePath);
-  const within = path.relative(workspaceRoot, abs);
-  if (within.startsWith('..') || path.isAbsolute(within)) return null;
+  if (!workspaceRelativePath(workspaceRoot, abs)) return null;
   const normalized = sourcePath.replace(/^\/+/, '');
-  return { sourcePath: normalized, locKey: `${normalized}:${line}:${column}` };
+  return { sourcePath: normalized, locKey: `${normalized}:${parsed.line}:${parsed.column}` };
 }

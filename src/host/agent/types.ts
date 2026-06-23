@@ -39,6 +39,8 @@ export interface AgentElementRequest {
   apiKey?: string;
   userPrompt: string;
   element: ElementSourceReference;
+  /** Aborts the run when the owning edit thread is paused/restarted/removed. */
+  signal?: AbortSignal;
 }
 
 export interface PageSourceReference {
@@ -56,6 +58,8 @@ export interface AgentPageRequest {
   apiKey?: string;
   userPrompt: string;
   page: PageSourceReference;
+  /** Aborts the run when the owning edit thread is paused/restarted/removed. */
+  signal?: AbortSignal;
 }
 
 export interface AgentRunSink {

@@ -7,6 +7,7 @@ import type {
 import { setupEditSession, type EditSession } from './editSession';
 import { setupHelpPanel } from './helpPanel';
 import { setupOverlay } from './overlay';
+import { setupThreadPins, type ThreadPinsController } from './threadPins';
 import { setupFormatToolbar } from './toolbar';
 import { makeDefaultActionHandler, makeDefaultRefreshHandler } from './toolbar/wiring';
 
@@ -53,21 +54,26 @@ function start(): void {
     postToParent,
     onError: (message, stack) => reportError({ source: 'finesse', message, stack }),
   });
+  const pins = setupThreadPins({
+    session,
+    postToParent,
+    currentPath: () => init.fileMeta.path,
+  });
   setupReloadSocket(init.fileMeta.path);
-  setupHostMessageListener(session);
+  setupHostMessageListener(session, pins);
   postReady(init);
   if (init.fileMeta.renderMode === 'react') {
     waitForReactDom(() => {
-      setupEditingUi(session);
+      setupEditingUi(session, pins);
       discoverReactDom(init.fileMeta.path, init.offsetMap?.documentVersion);
     });
     return;
   }
-  setupEditingUi(session);
+  setupEditingUi(session, pins);
 }
 
-function setupEditingUi(session: EditSession): void {
-  setupOverlay({ session });
+function setupEditingUi(session: EditSession, pins: ThreadPinsController): void {
+  setupOverlay({ session, onStartEdit: (el) => pins.startNewEdit(el) });
   setupHelpPanel(session);
   setupFormatToolbar({
     session,
@@ -178,7 +184,7 @@ function setupReloadSocket(path: string): void {
   open();
 }
 
-function setupHostMessageListener(session: EditSession): void {
+function setupHostMessageListener(session: EditSession, pins: ThreadPinsController): void {
   window.addEventListener('message', (event: MessageEvent) => {
     const data = event.data as IframeInboundMessage | undefined;
     if (!data || typeof data !== 'object' || typeof (data as { type?: unknown }).type !== 'string') return;
@@ -188,6 +194,18 @@ function setupHostMessageListener(session: EditSession): void {
         break;
       case 'editAck':
         session.applyOffsetMap(data.offsetMap);
+        break;
+      case 'agentThreadsState':
+        pins.applyThreadsState(data);
+        break;
+      case 'agentThreadRunStatus':
+        pins.applyRunStatus(data);
+        break;
+      case 'resolveAnchor':
+        pins.resolveAnchor(data);
+        break;
+      case 'focusThreadPin':
+        pins.focusThread(data.threadId);
         break;
       case 'staleCommit':
         session.onStale();

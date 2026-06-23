@@ -32,6 +32,14 @@ export class ClaudeCodeAgentProvider implements AgentProvider {
       env.ANTHROPIC_API_KEY = request.apiKey;
     }
 
+    // Bridge the thread's AbortSignal to the SDK's AbortController so a
+    // paused/restarted/removed thread genuinely stops the run.
+    const abortController = new AbortController();
+    if (request.signal) {
+      if (request.signal.aborted) abortController.abort();
+      else request.signal.addEventListener('abort', () => abortController.abort());
+    }
+
     const iterator = sdk.query({
       prompt,
       options: {
@@ -39,6 +47,7 @@ export class ClaudeCodeAgentProvider implements AgentProvider {
         model: request.model || undefined,
         permissionMode: 'acceptEdits',
         allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'],
+        abortController,
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',

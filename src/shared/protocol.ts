@@ -184,6 +184,107 @@ export type AgentRunStatus = {
   errorKind?: 'auth';
 };
 
+// ── Multi-edit "threads" (ADDITIVE) ───────────────────────────────────────
+//
+// Lingering, per-element AI edits. Each "thread" is scoped to one element,
+// can be steered/paused/resumed/restarted, and is rendered as a pin in the
+// preview plus a card in the side dock. These types are purely additive: they
+// introduce new `type` discriminants and union members only — no existing
+// message shape is altered, so current consumers are unaffected.
+
+export type EditThreadStatus =
+  | 'idle'
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'done'
+  | 'error'
+  | 'stale';
+
+/** One thread's observable state, as seen by the webview chrome and iframe. */
+export type EditThreadView = {
+  id: string;
+  status: EditThreadStatus;
+  providerId: AgentProviderId;
+  /** Target tag (lowercase) for pin/card labels; `'page'` for page-level threads. */
+  tagName: string;
+  /** Trimmed innerText preview of the target element. */
+  textPreview: string;
+  /** Structural anchor; lets the iframe position the pin. */
+  domPath: string;
+  selectorHints: string[];
+  /** Last resolved live elementId, when known. Absent when stale/unresolved. */
+  elementId?: number;
+  /** Source path the thread targets. */
+  path: string;
+  /** Number of instructions (initial prompt + steers). */
+  promptCount: number;
+  /** Tail of the run log (status + output). */
+  runLogTail: string;
+  error?: string;
+  errorKind?: 'auth';
+  /** 1-based queue position; present only when `status === 'queued'`. */
+  queuePosition?: number;
+  createdAt: number;
+  lastRunAt?: number;
+};
+
+/** Full thread-list snapshot for one source path. Sent on any mutation. */
+export type AgentThreadsState = {
+  type: 'agentThreadsState';
+  /** Source path these threads belong to (matches `PageState.relativePath`). */
+  path: string;
+  threads: EditThreadView[];
+  activeThreadId: string | null;
+};
+
+/**
+ * The full set of thread lifecycle actions. Driven identically by the side
+ * dock (chrome) and the in-preview pins (iframe). `create` anchors a new
+ * thread to a selection (or the page when `selection` is null); the rest
+ * target an existing thread by id.
+ */
+export type ThreadAction =
+  | {
+      kind: 'create';
+      /** Omitted when the initiator (e.g. an in-preview launcher) doesn't track
+       * the active provider — the host falls back to its selected provider. */
+      providerId?: AgentProviderId;
+      prompt: string;
+      selection: ElementSelectionSnapshot | null;
+    }
+  | { kind: 'steer'; threadId: string; prompt: string }
+  | { kind: 'run'; threadId: string }
+  | { kind: 'pause'; threadId: string }
+  | { kind: 'resume'; threadId: string }
+  | { kind: 'restart'; threadId: string }
+  | { kind: 'delete'; threadId: string }
+  | { kind: 'focus'; threadId: string };
+
+/** Streaming run output tagged to a specific thread. */
+export type AgentThreadRunStatus = {
+  type: 'agentThreadRunStatus';
+  threadId: string;
+  providerId: AgentProviderId;
+  phase: 'starting' | 'status' | 'output' | 'done' | 'error';
+  text?: string;
+  errorKind?: 'auth';
+};
+
+/**
+ * Host asks the iframe to resolve a durable anchor to a live element and
+ * return a fresh selection snapshot. The iframe matches `domPath` first, then
+ * falls back to `selectorHints` + `tagName` + `textPreview`.
+ */
+export type ResolveAnchor = {
+  type: 'resolveAnchor';
+  requestId: string;
+  domPath: string;
+  selectorHints: string[];
+  tagName: string;
+  textPreview: string;
+};
+
 export type HostMessage =
   | OffsetMap
   | Reload
@@ -196,7 +297,10 @@ export type HostMessage =
   | AgentSelectionState
   | AgentProviderState
   | AgentConnectionState
-  | AgentRunStatus;
+  | AgentRunStatus
+  | AgentThreadsState
+  | AgentThreadRunStatus
+  | ResolveAnchor;
 
 // ── Iframe → Host ─────────────────────────────────────────────────────────
 
@@ -427,6 +531,38 @@ export type EditCssDeclaration = DocumentScopedMessage & {
   value: string | null;
 };
 
+/**
+ * Iframe's reply to {@link ResolveAnchor}: a freshly-built selection for the
+ * resolved element, or `null` if the anchor could not be matched. (ADDITIVE)
+ */
+export type AnchorResolved = DocumentScopedMessage & {
+  type: 'anchorResolved';
+  requestId: string;
+  selection: ElementSelectionSnapshot | null;
+};
+
+/**
+ * Iframe reports the live on-screen rect of each thread pin so the chrome can
+ * place inline composers and the host can keep pin positions fresh. (ADDITIVE)
+ */
+export type ThreadPinRects = {
+  type: 'threadPinRects';
+  rects: Array<{
+    threadId: string;
+    rect: { x: number; y: number; width: number; height: number };
+    /** False when the element is currently off-screen / not found. */
+    visible: boolean;
+  }>;
+};
+
+/**
+ * A thread lifecycle action originating from the in-preview pins. Relayed by
+ * the chrome to the host verbatim. (ADDITIVE) */
+export type ThreadActionRequest = DocumentScopedMessage & {
+  type: 'threadActionRequest';
+  payload: ThreadAction;
+};
+
 export type IframeMessage =
   | ReactDomDiscovery
   | EditCommit
@@ -442,7 +578,10 @@ export type IframeMessage =
   | UndoRequest
   | RedoRequest
   | CommandPaletteRequest
-  | ElementSelectionChanged;
+  | ElementSelectionChanged
+  | AnchorResolved
+  | ThreadPinRects
+  | ThreadActionRequest;
 
 // ── Webview (chrome) → Iframe ─────────────────────────────────────────────
 //
@@ -494,11 +633,20 @@ export type ChromeModifierKey = {
   repeat?: boolean;
 };
 
+/**
+ * Chrome (side-dock roster) asks the iframe to focus a thread's pin: open its
+ * inline composer and scroll the target element into view. (ADDITIVE) */
+export type FocusThreadPin = {
+  type: 'focusThreadPin';
+  threadId: string;
+};
+
 export type ChromeIframeMessage =
   | PanelStyleEdit
   | PanelCssEdit
   | PanelSelectElement
-  | ChromeModifierKey;
+  | ChromeModifierKey
+  | FocusThreadPin;
 
 /** Everything the iframe's window-message listener may receive. */
 export type IframeInboundMessage = HostMessage | ChromeIframeMessage;
@@ -524,4 +672,10 @@ export type WebviewActionMessage =
   | { type: '__webview_action'; action: 'connectAgent'; providerId: AgentProviderId }
   | { type: '__webview_action'; action: 'selectAgentProvider'; providerId: AgentProviderId }
   | { type: '__webview_action'; action: 'changeAgentModel' }
-  | { type: '__webview_action'; action: 'runAgent'; value: string; providerId: AgentProviderId };
+  | { type: '__webview_action'; action: 'runAgent'; value: string; providerId: AgentProviderId }
+  // ── Multi-edit thread actions (ADDITIVE) ────────────────────────────────
+  // Both the side-dock roster (chrome) and the in-preview pins (iframe) drive
+  // the same thread lifecycle. The action set is defined once as ThreadAction
+  // and carried by both the chrome ({@link WebviewActionMessage}) and the
+  // iframe ({@link ThreadActionRequest}) so the two surfaces never diverge.
+  | { type: '__webview_action'; action: 'threadAction'; payload: ThreadAction };

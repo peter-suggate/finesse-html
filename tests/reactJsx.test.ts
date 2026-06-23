@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { buildReactOffsetMap } from '../src/host/parse/reactJsx';
 import {
   computeReactAttrEditSplices,
@@ -33,6 +36,32 @@ function mapFor(source: string, needles: string[]) {
       occurrence: 0,
     })),
   });
+}
+
+function locForPath(sourcePathForLoc: string, source: string, needle: string): string {
+  const offset = source.indexOf(needle);
+  if (offset < 0) throw new Error(`missing ${needle}`);
+  const before = source.slice(0, offset);
+  const lines = before.split('\n');
+  return `${sourcePathForLoc}:${lines.length}:${lines.at(-1)!.length}`;
+}
+
+function createWorkspace(files: Record<string, string>): {
+  root: string;
+  dispose(): void;
+} {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'finesse-react-jsx-'));
+  for (const [relPath, source] of Object.entries(files)) {
+    const filePath = path.join(root, relPath);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, source);
+  }
+  return {
+    root,
+    dispose(): void {
+      fs.rmSync(root, { recursive: true, force: true });
+    },
+  };
 }
 
 describe('React JSX offset maps', () => {
@@ -92,5 +121,120 @@ describe('React JSX offset maps', () => {
       commit: { type: 'editRemove', documentVersion: 7, elementIds: [1] },
     });
     expect(remove.ok && applySplicesToSource(source, remove.splices)).toContain('<div className="hero"></div>');
+  });
+
+  it('resolves jsx-loc paths from a nested Next app root in a monorepo workspace', () => {
+    const source = 'export default function Page() {\n  return <main><h1>Control Plane</h1></main>;\n}\n';
+    const workspace = createWorkspace({
+      'front-end/next.config.ts': 'export default {};\n',
+      'front-end/package.json': '{"dependencies":{"next":"16.2.6","react":"19.2.4"},"devDependencies":{"jsx-loc-plugin":"0.2.157"}}\n',
+      'front-end/src/app/page.tsx': source,
+    });
+    try {
+      const map = buildReactOffsetMap({
+        workspaceRoot: workspace.root,
+        previewPath: '__finesse_dev_server__/preview.tsx',
+        activeDocumentPath: '__finesse_dev_server__/preview.tsx',
+        activeDocumentText: '',
+        activeDocumentVersion: 1,
+        discoveries: [
+          {
+            elementId: 0,
+            loc: locForPath('src/app/page.tsx', source, '<main'),
+            tagName: 'main',
+            occurrence: 0,
+          },
+          {
+            elementId: 1,
+            loc: locForPath('src/app/page.tsx', source, '<h1'),
+            tagName: 'h1',
+            occurrence: 0,
+          },
+        ],
+      });
+
+      expect(map.elements.map((e) => e.sourcePath)).toEqual([
+        'front-end/src/app/page.tsx',
+        'front-end/src/app/page.tsx',
+      ]);
+      expect(map.textNodes).toHaveLength(1);
+      expect(map.textNodes[0].sourcePath).toBe('front-end/src/app/page.tsx');
+    } finally {
+      workspace.dispose();
+    }
+  });
+
+  it('uses the nested app root that resolves the most discovered jsx-loc files', () => {
+    const appSource = 'export function App() {\n  return <main>Dashboard</main>;\n}\n';
+    const headerSource = 'export function Header() {\n  return <header>Header</header>;\n}\n';
+    const workspace = createWorkspace({
+      'apps/admin/next.config.ts': 'export default {};\n',
+      'apps/admin/src/App.tsx': appSource,
+      'apps/web/next.config.ts': 'export default {};\n',
+      'apps/web/src/App.tsx': appSource,
+      'apps/web/src/Header.tsx': headerSource,
+    });
+    try {
+      const map = buildReactOffsetMap({
+        workspaceRoot: workspace.root,
+        previewPath: '__finesse_dev_server__/preview.tsx',
+        activeDocumentPath: '__finesse_dev_server__/preview.tsx',
+        activeDocumentText: '',
+        activeDocumentVersion: 1,
+        discoveries: [
+          {
+            elementId: 0,
+            loc: locForPath('src/App.tsx', appSource, '<main'),
+            tagName: 'main',
+            occurrence: 0,
+          },
+          {
+            elementId: 1,
+            loc: locForPath('src/Header.tsx', headerSource, '<header'),
+            tagName: 'header',
+            occurrence: 0,
+          },
+        ],
+      });
+
+      expect(map.elements.map((e) => e.sourcePath)).toEqual([
+        'apps/web/src/App.tsx',
+        'apps/web/src/Header.tsx',
+      ]);
+    } finally {
+      workspace.dispose();
+    }
+  });
+
+  it('locks an ambiguous nested jsx-loc source instead of guessing a package', () => {
+    const source = 'export function App() {\n  return <main>Dashboard</main>;\n}\n';
+    const workspace = createWorkspace({
+      'apps/admin/next.config.ts': 'export default {};\n',
+      'apps/admin/src/App.tsx': source,
+      'apps/web/next.config.ts': 'export default {};\n',
+      'apps/web/src/App.tsx': source,
+    });
+    try {
+      const map = buildReactOffsetMap({
+        workspaceRoot: workspace.root,
+        previewPath: '__finesse_dev_server__/preview.tsx',
+        activeDocumentPath: '__finesse_dev_server__/preview.tsx',
+        activeDocumentText: '',
+        activeDocumentVersion: 1,
+        discoveries: [
+          {
+            elementId: 0,
+            loc: locForPath('src/App.tsx', source, '<main'),
+            tagName: 'main',
+            occurrence: 0,
+          },
+        ],
+      });
+
+      expect(map.elements).toHaveLength(0);
+      expect(map.react?.locks).toEqual([{ elementId: 0, reason: 'missing-source-file' }]);
+    } finally {
+      workspace.dispose();
+    }
   });
 });

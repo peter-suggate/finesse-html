@@ -267,6 +267,172 @@ test('keeps data-no-edit and preformatted regions out of text edit mode', async 
   }
 });
 
+test('renders edit-thread pins and drives thread actions from the inline composer', async ({
+  page,
+}) => {
+  const harness = await createHarness(page);
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    // Derive the live anchor (domPath/selectorHints) the way the host would,
+    // by selecting the element and reading its emitted snapshot.
+    await page.locator('#page-title').click();
+    const selMsgs = await waitForMessages(page, 'elementSelectionChanged', 1);
+    const selection = (
+      selMsgs[0] as Extract<IframeMessage, { type: 'elementSelectionChanged' }>
+    ).selection!;
+    await page.keyboard.press('Escape');
+
+    // The host posts an agentThreadsState snapshot describing one running thread
+    // anchored to that element. The iframe should render a pin over it.
+    await page.evaluate(
+      ({ domPath, selectorHints, tagName, textPreview }) => {
+        window.postMessage(
+          {
+            type: 'agentThreadsState',
+            path: 'detailed-example.html',
+            activeThreadId: 't1',
+            threads: [
+              {
+                id: 't1',
+                status: 'running',
+                providerId: 'claude-code',
+                tagName,
+                textPreview,
+                domPath,
+                selectorHints,
+                path: 'detailed-example.html',
+                promptCount: 1,
+                runLogTail: 'working…',
+                createdAt: 1,
+              },
+            ],
+          },
+          '*',
+        );
+      },
+      {
+        domPath: selection.domPath,
+        selectorHints: selection.selectorHints,
+        tagName: selection.tagName,
+        textPreview: selection.textPreview,
+      },
+    );
+
+    const pin = page.locator('#finesse-pin-t1');
+    await expect(pin).toBeVisible();
+    // The pin shows a spinner while running.
+    await expect(pin.locator('.finesse-pin-spin')).toBeAttached();
+
+    // Open the composer and type a steering instruction.
+    await pin.click();
+    const composer = page.locator('#finesse-composer-t1');
+    await expect(composer).toBeVisible();
+    await composer.locator('.finesse-composer-input').fill('make it punchier');
+
+    // Regression: the host streams agentThreadsState on every output chunk.
+    // These rapid snapshots must NOT tear down the composer (which used to eat
+    // clicks and wipe the textarea). Fire several, then assert the typed text
+    // survives and the input element is the same node.
+    await page.evaluate(() => {
+      const post = (log: string) =>
+        window.postMessage(
+          {
+            type: 'agentThreadsState',
+            path: 'detailed-example.html',
+            activeThreadId: 't1',
+            threads: [
+              {
+                id: 't1',
+                status: 'running',
+                providerId: 'claude-code',
+                tagName: 'h1',
+                textPreview: 'Acme Studio Launch Plan',
+                domPath: 'body',
+                selectorHints: [],
+                path: 'detailed-example.html',
+                promptCount: 1,
+                runLogTail: log,
+                createdAt: 1,
+              },
+            ],
+          },
+          '*',
+        );
+      for (let i = 0; i < 8; i++) post(`streaming chunk ${i}\n`);
+    });
+
+    // Text preserved across the storm of updates.
+    await expect(composer.locator('.finesse-composer-input')).toHaveValue('make it punchier');
+    // The running log updated in place.
+    await expect(composer.locator('.finesse-composer-log')).toContainText('streaming chunk 7');
+
+    // And the action button is still clickable (the bug made clicks no-ops).
+    await composer.getByText('Steer', { exact: true }).click();
+
+    await waitForMessages(page, 'threadActionRequest', 1);
+    const actions = await page.evaluate(() => {
+      const win = window as Window & {
+        __e2eMessages?: Array<{ type?: string; payload?: { kind?: string; prompt?: string } }>;
+      };
+      return (win.__e2eMessages ?? [])
+        .filter((m) => m.type === 'threadActionRequest')
+        .map((m) => m.payload);
+    });
+    expect(actions[0]).toMatchObject({ kind: 'steer', threadId: 't1', prompt: 'make it punchier' });
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test('starts a fresh edit from the in-preview launcher on a selected element', async ({
+  page,
+}) => {
+  const harness = await createHarness(page);
+  try {
+    await page.goto(harness.url);
+    await waitForMessages(page, 'ready', 1);
+
+    // Select an element — the AI-edit launcher appears on the selection.
+    await page.locator('#page-title').click();
+    const launcher = page.locator('#finesse-edit-launch');
+    await expect(launcher).toBeVisible();
+
+    // Click it → a fresh "new edit" composer opens anchored to the element.
+    await launcher.click();
+    const draft = page.locator('#finesse-composer-new');
+    await expect(draft).toBeVisible();
+    await expect(draft.locator('.finesse-composer-input')).toBeFocused();
+
+    // Type a prompt and start the edit → emits a create threadActionRequest
+    // carrying the element's selection snapshot.
+    await draft.locator('.finesse-composer-input').fill('shorten this headline');
+    await draft.getByText('Start edit', { exact: true }).click();
+
+    await waitForMessages(page, 'threadActionRequest', 1);
+    const create = await page.evaluate(() => {
+      const win = window as Window & {
+        __e2eMessages?: Array<{
+          type?: string;
+          payload?: { kind?: string; prompt?: string; selection?: { tagName?: string } };
+        }>;
+      };
+      return (win.__e2eMessages ?? [])
+        .filter((m) => m.type === 'threadActionRequest')
+        .map((m) => m.payload)
+        .find((p) => p?.kind === 'create');
+    });
+    expect(create).toBeTruthy();
+    expect(create).toMatchObject({ kind: 'create', prompt: 'shorten this headline' });
+    expect(create?.selection?.tagName).toBe('h1');
+    // The draft composer closes after submitting.
+    await expect(draft).toBeHidden();
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test('selects an element and emits agent context without running an agent', async ({ page }) => {
   const harness = await createHarness(page);
   try {

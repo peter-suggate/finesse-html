@@ -109,6 +109,63 @@ describe('agent selected-element context flow', () => {
     expect(claudePrompt).toContain('Edit tool');
   });
 
+  it('uses element sourcePath for agent context when a dev-server preview maps to a real React file', () => {
+    const source = 'export function App() {\n  return <main><h1>Costs Dashboard</h1></main>;\n}\n';
+    const mainStart = source.indexOf('<main>');
+    const mainEnd = source.indexOf('</main>') + '</main>'.length;
+    const offsetMap = {
+      type: 'offsetMap',
+      path: '__finesse_dev_server__/preview.tsx',
+      documentVersion: 1,
+      elements: [
+        {
+          elementId: 0,
+          tagName: 'main',
+          startOffset: mainStart,
+          endOffset: mainEnd,
+          sourcePath: 'front-end/src/app/page.tsx',
+        },
+      ],
+      blocks: [],
+      textNodes: [],
+      react: {
+        mode: 'react',
+        lockedElementIds: [],
+        locks: [],
+        elements: [],
+        blocks: [],
+        textNodes: [],
+      },
+    } satisfies import('../src/shared/protocol').OffsetMap;
+
+    const selection: ElementSelectionSnapshot = {
+      path: '__finesse_dev_server__/preview.tsx',
+      documentVersion: 1,
+      elementId: 0,
+      tagName: 'main',
+      domPath: 'body > main',
+      selectorHints: [],
+      classList: [],
+      classCatalog: [],
+      classRules: {},
+      textPreview: 'Costs Dashboard',
+      outerHtmlPreview: '<main><h1>Costs Dashboard</h1></main>',
+      rect: { x: 0, y: 0, width: 1, height: 1 },
+      styles: EMPTY_STYLES,
+    };
+
+    const element = buildElementSourceReference({
+      document: textDocument(source),
+      relativePath: '__finesse_dev_server__/preview.tsx',
+      offsetMap,
+      selection,
+    });
+
+    expect(element.workspaceRelativePath).toBe('front-end/src/app/page.tsx');
+    expect(element.token).toContain('finesse-selection:front-end/src/app/page.tsx:1');
+    expect(element.source).toBe('<main><h1>Costs Dashboard</h1></main>');
+  });
+
   it('rejects stale selections before any agent provider can run', () => {
     const source = '<html><body><button>Go</button></body></html>';
     const offsetMap = walkEditable(source, 3);

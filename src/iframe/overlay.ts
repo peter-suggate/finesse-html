@@ -3,6 +3,8 @@ import { sanitizePaste } from './pasteSanitizer';
 
 export interface OverlayOpts {
   session: EditSession;
+  /** Start a fresh AI edit anchored to `el` (the in-preview launcher). */
+  onStartEdit?: (el: HTMLElement) => void;
 }
 
 const HOVER_STYLE: Partial<CSSStyleDeclaration> = {
@@ -45,6 +47,29 @@ const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
   opacity: '0.55',
   userSelect: 'none',
   transition: 'opacity 100ms ease-out, color 100ms ease-out',
+};
+
+const EDIT_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
+  position: 'fixed',
+  display: 'none',
+  alignItems: 'center',
+  gap: '3px',
+  height: '18px',
+  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontSize: '11px',
+  fontWeight: '600',
+  lineHeight: '18px',
+  color: '#ffffff',
+  background: 'rgba(30, 111, 217, 0.95)',
+  border: 'none',
+  borderRadius: '9px',
+  cursor: 'pointer',
+  padding: '0 8px',
+  zIndex: '2147483642',
+  boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
+  userSelect: 'none',
+  whiteSpace: 'nowrap',
+  transition: 'opacity 100ms ease-out, background 100ms ease-out',
 };
 
 const isMac =
@@ -103,11 +128,13 @@ export function setupOverlay(opts: OverlayOpts): void {
   const hover = createOverlay(HOVER_STYLE, 'finesse-hover');
   const selection = createOverlay(SELECTION_STYLE, 'finesse-selection');
   const deleteBtn = createDeleteButton();
+  const editBtn = createEditButton();
   const nativeClickHint = createNativeClickHint();
   const interactToggle = createInteractToggle();
   document.body.appendChild(hover);
   document.body.appendChild(selection);
   document.body.appendChild(deleteBtn);
+  document.body.appendChild(editBtn);
   document.body.appendChild(nativeClickHint);
   document.body.appendChild(interactToggle);
 
@@ -161,21 +188,36 @@ export function setupOverlay(opts: OverlayOpts): void {
   function refreshDeleteButton(): void {
     if (session.isLocked()) {
       deleteBtn.style.display = 'none';
+      editBtn.style.display = 'none';
       return;
     }
     const el = deleteTargetEl();
     if (!el) {
       deleteBtn.style.display = 'none';
+      editBtn.style.display = 'none';
       return;
     }
     if (el !== selectedEl && isInteractiveClickTarget(el)) {
       deleteBtn.style.display = 'none';
+      editBtn.style.display = 'none';
       return;
     }
     const r = rectOf(el);
     deleteBtn.style.display = 'block';
     deleteBtn.style.left = `${Math.max(0, r.right - 18)}px`;
     deleteBtn.style.top = `${Math.max(0, r.top + 2)}px`;
+
+    // The AI-edit launcher only attaches to a committed selection (not a bare
+    // hover), and never to interactive targets (links/buttons) where it would
+    // overlap their own hit area. It sits just left of delete.
+    if (opts.onStartEdit && el === selectedEl && !isInteractiveClickTarget(el)) {
+      editBtn.style.display = 'inline-flex';
+      const w = editBtn.offsetWidth || 56;
+      editBtn.style.left = `${Math.max(0, r.right - 22 - w)}px`;
+      editBtn.style.top = `${Math.max(0, r.top + 1)}px`;
+    } else {
+      editBtn.style.display = 'none';
+    }
   }
 
   function setHoveredEl(el: HTMLElement | null): void {
@@ -326,6 +368,18 @@ export function setupOverlay(opts: OverlayOpts): void {
     hover.style.display = 'none';
     showSelection(null);
     session.removeElement(target);
+  });
+
+  editBtn.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  editBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (session.isLocked() || !selectedEl) return;
+    opts.onStartEdit?.(selectedEl);
   });
 
   interactToggle.addEventListener('mousedown', (e) => {
@@ -787,6 +841,24 @@ function createDeleteButton(): HTMLButtonElement {
   btn.title = 'Remove element (Delete)';
   btn.setAttribute('aria-label', 'Remove element');
   Object.assign(btn.style, DELETE_BUTTON_STYLE);
+  return btn;
+}
+
+function createEditButton(): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.id = 'finesse-edit-launch';
+  btn.type = 'button';
+  btn.title = 'Start an AI edit on this element';
+  btn.setAttribute('aria-label', 'Start an AI edit on this element');
+  // Sparkle glyph + label, mirroring the deck's "AI edit" affordance.
+  btn.innerHTML = '<span aria-hidden="true">✦</span><span>Edit</span>';
+  Object.assign(btn.style, EDIT_BUTTON_STYLE);
+  btn.addEventListener('mouseenter', () => {
+    btn.style.background = 'rgba(40, 124, 240, 1)';
+  });
+  btn.addEventListener('mouseleave', () => {
+    btn.style.background = 'rgba(30, 111, 217, 0.95)';
+  });
   return btn;
 }
 

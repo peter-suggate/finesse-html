@@ -217,6 +217,15 @@ function bootIframe(init: InitData): void {
             providerId: currentAgentProvider,
           });
         },
+        onThreadAction: (payload) => {
+          // 'focus' opens the thread's pin in the preview; the iframe owns pin
+          // state, so route it straight there. The rest go to the host engine.
+          if (payload.kind === 'focus') {
+            postToIframe({ type: 'focusThreadPin', threadId: payload.threadId });
+            return;
+          }
+          post({ type: '__webview_action', action: 'threadAction', payload });
+        },
       },
     });
   }
@@ -365,6 +374,19 @@ function bootIframe(init: InitData): void {
             break;
         }
         break;
+      case 'agentThreadsState':
+        // Drive the in-preview pins and the side-dock roster from one snapshot.
+        relayToIframe(data);
+        agentPanel?.setThreads(data.threads, data.activeThreadId);
+        break;
+      case 'agentThreadRunStatus':
+        relayToIframe(data);
+        agentPanel?.applyThreadRunStatus(data);
+        break;
+      case 'resolveAnchor':
+        // Host needs the iframe to map a durable anchor to a live element.
+        relayToIframe(data);
+        break;
     }
   }
 }
@@ -429,7 +451,10 @@ function isIframeMessage(data: unknown): data is IframeMessage {
     t === 'undoRequest' ||
     t === 'redoRequest' ||
     t === 'commandPaletteRequest' ||
-    t === 'elementSelectionChanged'
+    t === 'elementSelectionChanged' ||
+    t === 'anchorResolved' ||
+    t === 'threadPinRects' ||
+    t === 'threadActionRequest'
   );
 }
 
@@ -448,6 +473,9 @@ function isHostMessage(data: unknown): data is HostMessage {
     t === 'agentSelectionState' ||
     t === 'agentProviderState' ||
     t === 'agentConnectionState' ||
-    t === 'agentRunStatus'
+    t === 'agentRunStatus' ||
+    t === 'agentThreadsState' ||
+    t === 'agentThreadRunStatus' ||
+    t === 'resolveAnchor'
   );
 }

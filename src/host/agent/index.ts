@@ -19,6 +19,8 @@ export interface RunSelectedElementAgentOpts {
   /** Receive status/output lines so callers can render them inline (e.g. webview popover). */
   onStatus?: (text: string) => void;
   onOutput?: (text: string) => void;
+  /** Aborts the provider run when the owning edit thread is paused/restarted/removed. */
+  signal?: AbortSignal;
 }
 
 const output = vscode.window.createOutputChannel('Finesse Agent');
@@ -90,6 +92,7 @@ export async function runSelectedElementAgent(
     model: opts.model,
     apiKey: apiKey?.value,
     userPrompt: opts.userPrompt,
+    signal: opts.signal,
   };
 
   const sink: AgentRunSink = {

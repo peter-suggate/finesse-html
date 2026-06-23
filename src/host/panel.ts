@@ -7,6 +7,9 @@ import type {
   AgentProviderState,
   AgentRunStatus,
   AgentSelectionState,
+  AgentThreadRunStatus,
+  AgentThreadsState,
+  AnchorResolved,
   DocumentState,
   EditBlockHtml,
   EditBlockTag,
@@ -15,6 +18,7 @@ import type {
   EditCssDeclaration,
   EditElementAttrs,
   EditRemove,
+  EditThreadView,
   ElementSelectionChanged,
   ElementSelectionSnapshot,
   FileMeta,
@@ -23,12 +27,17 @@ import type {
   OffsetMap,
   Ready,
   ReactDomDiscovery,
+  ResolveAnchor,
   RuntimeError,
+  ThreadAction,
   WebviewActionMessage,
 } from '../shared/protocol';
 import { runSelectedElementAgent } from './agent';
 import { AgentCredentialStore } from './agent/credentials';
 import { isAgentProviderId } from './agent/types';
+import { createThreadEngine, type ThreadRunContext } from './agent/threads/engine';
+import { anchorFromSelection, threadLabel, type EditThread } from './agent/threads/types';
+import { loadThreads, persistThreads } from './agent/threads/store';
 import {
   applyAttrEditCommit,
   applyBlockHtmlCommit,
@@ -59,6 +68,19 @@ const REACT_LANGUAGE_IDS: ReadonlySet<string> = new Set([
   'javascriptreact',
   'typescriptreact',
 ]);
+
+/**
+ * Placeholder computed-style block for the synthetic selection the host builds
+ * on an anchor cache hit. The agent run path ignores styles, so empty strings
+ * are fine — only the element identity (path/version/elementId) matters here.
+ */
+const EMPTY_COMPUTED_STYLES: ElementSelectionSnapshot['styles']['computed'] = {
+  display: '', paddingTop: '', paddingRight: '', paddingBottom: '', paddingLeft: '',
+  marginTop: '', marginRight: '', marginBottom: '', marginLeft: '',
+  borderTopWidth: '', borderTopStyle: '', borderTopColor: '', borderTopLeftRadius: '',
+  backgroundColor: '', flexDirection: '', justifyContent: '', alignItems: '',
+  flexWrap: '', rowGap: '', gridTemplateColumns: '', gridTemplateRows: '',
+};
 
 function isJsLikeDocument(doc: vscode.TextDocument): boolean {
   return JS_LANGUAGE_IDS.has(doc.languageId);
@@ -256,11 +278,50 @@ function createPreviewPanelFromSource(
   const pages = new Map<string, PageState>();
   let activeRelativePath = relativePath;
   let currentAgentSelection: ElementSelectionSnapshot | null = null;
-  let agentRunning = false;
   const credentials = new AgentCredentialStore(deps.context);
   let selectedProvider: AgentProviderId = deps.getConfig().agentDefaultProvider;
   const siteHistory = new SiteSnapshotHistory();
   let nextEditTransactionId = 1;
+
+  // Each lingering edit "thread" runs its agent through this serialized engine
+  // (one provider run touches the file at a time; the rest queue). A thread's
+  // target is re-anchored just before each run via the iframe (durable
+  // domPath/selectorHints), so threads survive reparses and reloads.
+  const threadEngine = createThreadEngine({
+    runThread: (ctx) => runThreadAgent(ctx),
+    onChange: () => onThreadsChanged(),
+    formatError: (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        message: humanizeAgentError(message, selectedProvider),
+        kind: isAgentAuthError(message, selectedProvider) ? 'auth' : undefined,
+      };
+    },
+  });
+  /** True while any thread's provider run is in flight. */
+  const isAgentRunning = (): boolean => threadEngine.isRunning();
+  // Pending anchor-resolution round-trips, keyed by requestId.
+  const pendingAnchorResolves = new Map<
+    string,
+    (selection: ElementSelectionSnapshot | null) => void
+  >();
+  const threadSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let threadsPostTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function onThreadsChanged(): void {
+    // The run sink fires onChange on every streamed output chunk. Posting the
+    // full threads snapshot each time floods the webview and makes the pin/
+    // composer UI churn. Coalesce snapshot posts on a short trailing timer; the
+    // lightweight selection state (the "agent running" affordance) stays
+    // immediate.
+    postAgentSelectionState();
+    scheduleThreadPersist();
+    if (threadsPostTimer) return;
+    threadsPostTimer = setTimeout(() => {
+      threadsPostTimer = null;
+      postAgentThreadsState();
+    }, 90);
+  }
 
   function activePage(): PageState {
     return pages.get(activeRelativePath) ?? pages.get(relativePath)!;
@@ -360,6 +421,31 @@ function createPreviewPanelFromSource(
     return (msg.path ? ensurePageForRel(msg.path) : null) ?? activePage();
   }
 
+  function sourcePathForSelection(
+    selection: ElementSelectionSnapshot,
+    offsetMap: OffsetMap | null,
+  ): string | null {
+    const element = offsetMap?.elements.find((e) => e.elementId === selection.elementId);
+    const sourcePath = element?.sourcePath ?? offsetMap?.path ?? selection.path ?? '';
+    const normalized = normalizeRelPath(sourcePath);
+    return normalized.startsWith('__finesse_dev_server__/') ? null : normalized;
+  }
+
+  async function openWorkspaceDocument(relPath: string): Promise<vscode.TextDocument> {
+    const normalized = normalizeRelPath(relPath);
+    if (!normalized) {
+      throw new Error('The selected element is not mapped to a source file.');
+    }
+    const uri = vscode.Uri.file(path.resolve(deps.workspaceRoot, normalized));
+    const within = path.relative(deps.workspaceRoot, uri.fsPath);
+    if (within.startsWith('..') || path.isAbsolute(within)) {
+      throw new Error(`The selected source file is outside the workspace: ${normalized}`);
+    }
+    const open = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === uri.fsPath);
+    if (open) return open;
+    return vscode.workspace.openTextDocument(uri);
+  }
+
   async function openDocumentForPage(page: PageState): Promise<vscode.TextDocument> {
     if (page.virtual) {
       throw new Error('The dev-server preview is not backed by a source document.');
@@ -425,9 +511,232 @@ function createPreviewPanelFromSource(
       type: 'agentSelectionState',
       selected: currentAgentSelection !== null,
       label: currentAgentSelection ? selectionLabel(currentAgentSelection) : undefined,
-      agentRunning,
+      agentRunning: isAgentRunning(),
     };
     panel.webview.postMessage(msg);
+  }
+
+  function buildThreadView(thread: EditThread): EditThreadView {
+    return {
+      id: thread.id,
+      status: thread.status,
+      providerId: thread.providerId,
+      tagName: thread.anchor.tagName,
+      textPreview: thread.anchor.textPreview,
+      domPath: thread.anchor.domPath,
+      selectorHints: thread.anchor.selectorHints,
+      elementId: thread.anchor.lastKnownElementId,
+      path: thread.anchor.path,
+      promptCount: thread.prompts.length,
+      runLogTail: thread.runLogTail,
+      error: thread.error,
+      errorKind: thread.errorKind,
+      queuePosition: threadEngine.queuePositionOf(thread.id),
+      createdAt: thread.createdAt,
+      lastRunAt: thread.lastRunAt,
+    };
+  }
+
+  /** One snapshot per source path, so each page's pins/roster stay scoped. */
+  function postAgentThreadsState(): void {
+    const byPath = new Map<string, EditThread[]>();
+    for (const thread of threadEngine.all()) {
+      const list = byPath.get(thread.anchor.path);
+      if (list) list.push(thread);
+      else byPath.set(thread.anchor.path, [thread]);
+    }
+    // Always include the active page so a now-empty page clears its UI.
+    if (!byPath.has(activeRelativePath)) byPath.set(activeRelativePath, []);
+    const activeId = threadEngine.activeId();
+    for (const [path, threads] of byPath) {
+      const msg: AgentThreadsState = {
+        type: 'agentThreadsState',
+        path,
+        threads: threads.map(buildThreadView),
+        activeThreadId: activeId,
+      };
+      panel.webview.postMessage(msg);
+    }
+  }
+
+  function postAgentThreadRunStatus(
+    threadId: string,
+    phase: AgentThreadRunStatus['phase'],
+    providerId: AgentProviderId,
+    text?: string,
+    errorKind?: AgentThreadRunStatus['errorKind'],
+  ): void {
+    const msg: AgentThreadRunStatus = {
+      type: 'agentThreadRunStatus',
+      threadId,
+      providerId,
+      phase,
+      text,
+      errorKind,
+    };
+    panel.webview.postMessage(msg);
+  }
+
+  function scheduleThreadPersist(): void {
+    const paths = new Set<string>(threadEngine.all().map((t) => t.anchor.path));
+    paths.add(activeRelativePath);
+    for (const relPath of paths) {
+      const existing = threadSaveTimers.get(relPath);
+      if (existing) clearTimeout(existing);
+      threadSaveTimers.set(
+        relPath,
+        setTimeout(() => {
+          threadSaveTimers.delete(relPath);
+          void persistThreads(deps.context.workspaceState, relPath, threadEngine.all());
+        }, 400),
+      );
+    }
+  }
+
+  /** Restore persisted threads for a page on first load. Re-anchor is lazy. */
+  function restoreThreadsForPage(relPath: string): void {
+    const restored = loadThreads(deps.context.workspaceState, relPath);
+    if (restored.length === 0) return;
+    for (const thread of restored) {
+      if (!threadEngine.get(thread.id)) threadEngine.hydrate(thread);
+    }
+    postAgentThreadsState();
+  }
+
+  /**
+   * Resolve a thread's durable anchor to a current selection snapshot. Fast
+   * path: reuse the cached elementId when the document version is unchanged.
+   * Otherwise ask the iframe to match the anchor against the live DOM.
+   */
+  async function resolveThreadAnchor(
+    thread: EditThread,
+  ): Promise<ElementSelectionSnapshot | null> {
+    const anchor = thread.anchor;
+    // Page-level threads have no element target.
+    if (!anchor.domPath) return null;
+
+    const page = ensurePageForRel(anchor.path) ?? activePage();
+    const offsetMap = page.currentOffsetMap;
+    if (
+      anchor.lastKnownElementId !== undefined &&
+      anchor.lastKnownVersion === page.currentVersion &&
+      offsetMap?.elements.some((e) => e.elementId === anchor.lastKnownElementId)
+    ) {
+      // Cache hit — synthesize a minimal snapshot from the cached identity.
+      return {
+        path: anchor.path,
+        documentVersion: page.currentVersion,
+        elementId: anchor.lastKnownElementId,
+        tagName: anchor.tagName,
+        domPath: anchor.domPath,
+        selectorHints: anchor.selectorHints,
+        classList: [],
+        classCatalog: [],
+        classRules: {},
+        textPreview: anchor.textPreview,
+        outerHtmlPreview: '',
+        rect: { x: 0, y: 0, width: 0, height: 0 },
+        styles: { inlineStyle: null, computed: EMPTY_COMPUTED_STYLES },
+      };
+    }
+
+    const resolved = await requestAnchorResolve(anchor);
+    if (resolved) {
+      anchor.lastKnownElementId = resolved.elementId;
+      anchor.lastKnownVersion = resolved.documentVersion;
+    }
+    return resolved;
+  }
+
+  /** Ask the iframe to resolve an anchor; resolves null on timeout/no match. */
+  function requestAnchorResolve(
+    anchor: EditThread['anchor'],
+  ): Promise<ElementSelectionSnapshot | null> {
+    const requestId = crypto.randomUUID();
+    return new Promise<ElementSelectionSnapshot | null>((resolve) => {
+      let settled = false;
+      const finish = (selection: ElementSelectionSnapshot | null): void => {
+        if (settled) return;
+        settled = true;
+        pendingAnchorResolves.delete(requestId);
+        resolve(selection);
+      };
+      pendingAnchorResolves.set(requestId, finish);
+      const msg: ResolveAnchor = {
+        type: 'resolveAnchor',
+        requestId,
+        domPath: anchor.domPath,
+        selectorHints: anchor.selectorHints,
+        tagName: anchor.tagName,
+        textPreview: anchor.textPreview,
+      };
+      panel.webview.postMessage(msg);
+      setTimeout(() => finish(null), 4000);
+    });
+  }
+
+  function handleAnchorResolved(msg: AnchorResolved): void {
+    const pending = pendingAnchorResolves.get(msg.requestId);
+    if (pending) pending(msg.selection);
+  }
+
+  function handleThreadAction(action: ThreadAction): void {
+    switch (action.kind) {
+      case 'create': {
+        void createAndRunThread(action.providerId, action.prompt, action.selection);
+        return;
+      }
+      case 'steer':
+        threadEngine.steer(action.threadId, action.prompt);
+        return;
+      case 'run':
+        threadEngine.run(action.threadId);
+        return;
+      case 'pause':
+        threadEngine.pause(action.threadId);
+        return;
+      case 'resume':
+        threadEngine.resume(action.threadId);
+        return;
+      case 'restart':
+        threadEngine.restart(action.threadId);
+        return;
+      case 'delete':
+        threadEngine.remove(action.threadId);
+        return;
+      case 'focus':
+        // Selecting the thread's element in the preview is a webview/iframe
+        // concern; the host has nothing to mutate. (Kept for symmetry.)
+        return;
+    }
+  }
+
+  async function createAndRunThread(
+    providerId: AgentProviderId | undefined,
+    prompt: string,
+    selection: ElementSelectionSnapshot | null,
+  ): Promise<void> {
+    const runProvider =
+      providerId && isAgentProviderId(providerId) ? providerId : selectedProvider;
+    if (runProvider !== selectedProvider) {
+      await setSelectedAgentProvider(runProvider, { persist: true });
+    }
+    const trimmed = (prompt ?? '').trim();
+    if (!trimmed) {
+      postAgentRunStatus('error', 'Prompt was empty.', runProvider);
+      return;
+    }
+    const anchor = selection
+      ? anchorFromSelection(selection, activeRelativePath)
+      : {
+          path: activeRelativePath,
+          domPath: '',
+          selectorHints: [],
+          tagName: 'page',
+          textPreview: activeRelativePath,
+        };
+    const thread = threadEngine.create({ anchor, providerId: runProvider, prompt: trimmed });
+    threadEngine.run(thread.id);
   }
 
   async function postAgentConnectionState(
@@ -585,6 +894,8 @@ function createPreviewPanelFromSource(
           await handleChangeAgentModel();
         } else if (msg.action === 'runAgent') {
           await handleRunAgentRequest(msg.value, msg.providerId);
+        } else if (msg.action === 'threadAction') {
+          handleThreadAction(msg.payload);
         }
         return;
       case 'ready':
@@ -629,6 +940,16 @@ function createPreviewPanelFromSource(
       case 'elementSelectionChanged':
         handleElementSelectionChanged(msg);
         return;
+      case 'anchorResolved':
+        handleAnchorResolved(msg);
+        return;
+      case 'threadActionRequest':
+        handleThreadAction(msg.payload);
+        return;
+      case 'threadPinRects':
+        // Pin rects are consumed by the iframe/chrome for composer placement;
+        // the host has nothing to persist. Ignored here.
+        return;
       case 'runtimeError':
         handleRuntimeError(msg);
         return;
@@ -653,7 +974,9 @@ function createPreviewPanelFromSource(
       );
     }
     postDocumentState();
+    restoreThreadsForPage(page.relativePath);
     postAgentSelectionState();
+    postAgentThreadsState();
     postAgentProviderState();
     void postAgentConnectionState();
   }
@@ -682,11 +1005,17 @@ function createPreviewPanelFromSource(
     page.currentOffsetMap = map;
     page.currentVersion = version;
     panel.webview.postMessage(map);
-    if (map.elements.length === 0) {
+    if (map.elements.length === 0 && msg.elements.length === 0) {
       postPreviewDiagnostic(
         page,
         'error',
         'React preview loaded, but no data-loc attributes were found. Enable jsx-loc-plugin in the app dev server, then reload the preview.',
+      );
+    } else if (map.elements.length === 0) {
+      postPreviewDiagnostic(
+        page,
+        'error',
+        'React preview loaded with data-loc attributes, but Finesse could not resolve them to source files under this workspace. Open the app root or check for ambiguous nested React apps.',
       );
     } else if ((map.react?.lockedElementIds.length ?? 0) > 0) {
       postPreviewDiagnostic(
@@ -1075,87 +1404,93 @@ function createPreviewPanelFromSource(
     postAgentSelectionState();
   }
 
+  /**
+   * Legacy "Ask Agent" entry point: create a one-shot edit thread on the
+   * current selection (or page) and enqueue it. With serialized execution a
+   * second request no longer drops — it queues behind the active run.
+   */
   async function handleRunAgentRequest(
     userPrompt: string,
     providerId: AgentProviderId,
   ): Promise<void> {
-    if (agentRunning) return;
-    const runProvider = isAgentProviderId(providerId) ? providerId : selectedProvider;
-    if (runProvider !== selectedProvider) {
-      await setSelectedAgentProvider(runProvider, { persist: true });
-    }
-    const trimmed = (userPrompt ?? '').trim();
-    if (!trimmed) {
-      postAgentRunStatus('error', 'Prompt was empty.', runProvider);
-      return;
-    }
-    if (
-      currentAgentSelection &&
-      (() => {
-        const selectionPage =
-          (currentAgentSelection.path ? ensurePageForRel(currentAgentSelection.path) : null) ??
-          activePage();
-        const selectionDoc = findOpenDocument(selectionPage);
-        return (
-          currentAgentSelection.documentVersion !== selectionPage.currentVersion ||
-          (selectionDoc !== undefined &&
-            currentAgentSelection.documentVersion !== selectionDoc.version)
-        );
-      })()
-    ) {
-      currentAgentSelection = null;
-      postAgentSelectionState();
-      postAgentRunStatus('error', 'That selection is stale. Select the element again.', runProvider);
-      return;
-    }
+    await createAndRunThread(providerId, userPrompt, currentAgentSelection);
+  }
 
-    agentRunning = true;
-    postAgentSelectionState();
+  /**
+   * Execute one dequeued thread's agent run. The thread's durable anchor is
+   * re-resolved to a *current* selection just before running (so it survives
+   * reparses), then fed to the existing agent pipeline. Streams both the
+   * thread-tagged {@link AgentThreadRunStatus} and — while this is the active
+   * run — the legacy {@link AgentRunStatus}, and appends to the thread's own
+   * epoch-guarded log. Throws on failure so the engine records `error`.
+   */
+  async function runThreadAgent(ctx: ThreadRunContext): Promise<void> {
+    const { thread, epoch, signal, prompt } = ctx;
+    const runProvider = thread.providerId;
     const cfg = deps.getConfig();
+    const model = runProvider === 'cursor' ? cfg.agentCursorModel : cfg.agentClaudeModel;
     const providerLabel = runProvider === 'cursor' ? 'Cursor Agent' : 'Claude Code';
-    const model =
-      runProvider === 'cursor' ? cfg.agentCursorModel : cfg.agentClaudeModel;
-    const targetLabel = currentAgentSelection
-      ? selectionLabel(currentAgentSelection)
-      : activeRelativePath;
-    postAgentRunStatus(
-      'starting',
-      `Running ${providerLabel} on ${targetLabel}`,
-      runProvider,
-    );
+
+    const emit = (
+      phase: AgentRunStatus['phase'],
+      text?: string,
+      errorKind?: AgentRunStatus['errorKind'],
+    ): void => {
+      if (text) threadEngine.appendRunLog(thread.id, epoch, formatThreadLogLine(phase, text));
+      postAgentThreadRunStatus(thread.id, phase, runProvider, text, errorKind);
+      // Mirror to the legacy single-log UI only while this is the active run.
+      if (threadEngine.activeId() === thread.id) {
+        postAgentRunStatus(phase, text, runProvider, errorKind);
+      }
+    };
+
+    emit('starting', `Running ${providerLabel} on ${threadLabel(thread)}`);
     try {
+      // Re-anchor element-scoped threads; page-level threads run on the page.
+      const selection =
+        thread.anchor.domPath !== '' ? await resolveThreadAnchor(thread) : null;
+      if (thread.anchor.domPath !== '' && !selection) {
+        threadEngine.setStatus(
+          thread.id,
+          'stale',
+          'The target element could not be found. The page may have changed — select it again to re-attach.',
+        );
+        emit('error', 'Target element not found.');
+        return;
+      }
+
       const agentPage =
-        (currentAgentSelection?.path ? ensurePageForRel(currentAgentSelection.path) : null) ??
-        activePage();
-      const agentDoc = await openDocumentForPage(agentPage);
+        (selection?.path ? ensurePageForRel(selection.path) : null) ??
+        (ensurePageForRel(thread.anchor.path) ?? activePage());
+      const selectionOffsetMap = agentPage.currentOffsetMap;
+      const selectionSourcePath = selection
+        ? sourcePathForSelection(selection, selectionOffsetMap)
+        : null;
+      const agentDoc = selectionSourcePath
+        ? await openWorkspaceDocument(selectionSourcePath)
+        : await openDocumentForPage(agentPage);
       await runSelectedElementAgent({
         providerId: runProvider,
         context: deps.context,
         workspaceRoot: deps.workspaceRoot,
         model,
         document: agentDoc,
-        relativePath: agentPage.relativePath,
-        offsetMap: agentPage.currentOffsetMap ?? undefined,
-        selection: currentAgentSelection ?? undefined,
-        userPrompt: trimmed,
-        onStatus: (text) => postAgentRunStatus('status', text, runProvider),
-        onOutput: (text) => postAgentRunStatus('output', text, runProvider),
+        relativePath: selectionSourcePath ?? agentPage.relativePath,
+        offsetMap: selectionOffsetMap ?? undefined,
+        selection: selection ?? undefined,
+        userPrompt: prompt,
+        onStatus: (text) => emit('status', text),
+        onOutput: (text) => emit('output', text),
+        signal,
       });
-      postAgentRunStatus('done', undefined, runProvider);
+      emit('done');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      postAgentRunStatus(
-        'error',
-        humanizeAgentError(message, runProvider),
-        runProvider,
-        isAgentAuthError(message, runProvider) ? 'auth' : undefined,
-      );
-      // Re-check connection — if the key is missing/invalid, the popover flips
+      emit('error', humanizeAgentError(message, runProvider), isAgentAuthError(message, runProvider) ? 'auth' : undefined);
+      // Re-check connection — if the key is missing/invalid, the panel flips
       // back to the Connect state automatically.
       await postAgentConnectionState(runProvider);
-    } finally {
-      agentRunning = false;
-      postAgentSelectionState();
+      throw err;
     }
   }
 
@@ -1374,6 +1709,22 @@ function createPreviewPanelFromSource(
 function selectionLabel(selection: ElementSelectionSnapshot): string {
   const text = selection.textPreview ? ` "${selection.textPreview.slice(0, 40)}"` : '';
   return `<${selection.tagName}>${text}`;
+}
+
+/** Format a provider status/output line for a thread's run log. */
+function formatThreadLogLine(phase: AgentRunStatus['phase'], text: string): string {
+  switch (phase) {
+    case 'status':
+      return `[${text}]\n`;
+    case 'output':
+      return text;
+    case 'done':
+      return '\n— done —\n';
+    case 'error':
+      return `\n${text}\n`;
+    default:
+      return `${text}\n`;
+  }
 }
 
 function reactSetupPreviewHtml(): string {
