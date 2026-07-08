@@ -127,4 +127,21 @@ describe('injectInstrumentation', () => {
     expect(payload).not.toContain('</script>');
     expect(payload).toContain('<\\/script>');
   });
+
+  it('can inject iframe cookie compatibility before app scripts', () => {
+    const html =
+      '<!doctype html><html><head><script src="/app.js"></script></head><body></body></html>';
+    const out = injectInstrumentation(html, {
+      offsetMap: null,
+      fileMeta: FILE_META,
+      cookieCompat: true,
+    });
+
+    const cookieCompatIdx = out.indexOf('__FINESSE_COOKIE_COMPAT_INSTALLED__');
+    const appScriptIdx = out.indexOf('<script src="/app.js">');
+    const runtimeIdx = out.indexOf('/__edit/runtime.js');
+    expect(cookieCompatIdx).toBeGreaterThan(0);
+    expect(cookieCompatIdx).toBeLessThan(appScriptIdx);
+    expect(runtimeIdx).toBeLessThan(out.indexOf('</body>'));
+  });
 });

@@ -20,8 +20,8 @@ json_string() {
 
 json_success() {
   local msg
-  msg="$(printf '%s' "Finesse extension built, packaged, and installed into available VS Code-family hosts.")"
-  printf '{"continue":true,"suppressOutput":true,"systemMessage":%s}\n' "$(printf '%s' "$msg" | json_string)"
+  msg="$(printf '%s' "Finesse extension built, packaged, and installed into available VS Code-family hosts. Reload the Cursor/VS Code window to use the newly installed extension host.")"
+  printf '{"continue":true,"suppressOutput":false,"systemMessage":%s}\n' "$(printf '%s' "$msg" | json_string)"
 }
 
 json_failure() {

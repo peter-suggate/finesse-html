@@ -22,6 +22,10 @@ describe('React dev server proxy', () => {
       expect(next.requests).toContain('/landing?draft=1');
       expect(res.headers.get('content-security-policy')).toBeNull();
       expect(html).toContain('/__edit/runtime.js');
+      expect(html).toContain('__FINESSE_COOKIE_COMPAT_INSTALLED__');
+      expect(html.indexOf('__FINESSE_COOKIE_COMPAT_INSTALLED__')).toBeLessThan(
+        html.indexOf('<script src="/_next/static/chunks/app.js">'),
+      );
       expect(html).toContain('"path":"src/app/page.tsx"');
       expect(html).toContain('"renderMode":"react"');
     } finally {
@@ -98,6 +102,29 @@ describe('React dev server proxy', () => {
       workspace.dispose();
     }
   });
+
+  it('rewrites dev-server cookies so iframe login sessions survive in the preview', async () => {
+    const next = await createFakeNextServer();
+    const workspace = createWorkspace();
+    const preview = await createTestPreviewServer(workspace.root, {
+      getReactDevServerUrl: () => next.url('/landing'),
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${preview.port}/api/login`, {
+        method: 'POST',
+      });
+
+      expect(await res.text()).toBe('ok');
+      expect(res.headers.getSetCookie()).toEqual([
+        'sAccessToken=abc; Path=/; HttpOnly; SameSite=None; Secure',
+        'sRefreshToken=def; Path=/api/auth; HttpOnly; Secure; SameSite=None',
+      ]);
+    } finally {
+      await preview.stop();
+      await next.stop();
+      workspace.dispose();
+    }
+  });
 });
 
 async function createTestPreviewServer(
@@ -148,12 +175,25 @@ async function createFakeNextServer(): Promise<{
       res.end('<!doctype html><html><body><h1 data-loc="src/app/about/page.tsx:1:0">About from Next</h1></body></html>');
       return;
     }
+    if (url.startsWith('/api/login')) {
+      res.writeHead(200, {
+        'content-type': 'text/plain; charset=utf-8',
+        'set-cookie': [
+          'sAccessToken=abc; Path=/; HttpOnly; SameSite=Lax',
+          'sRefreshToken=def; Path=/api/auth; HttpOnly; Secure',
+        ],
+      });
+      res.end('ok');
+      return;
+    }
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-security-policy': "default-src 'self'",
       'x-frame-options': 'DENY',
     });
-    res.end('<!doctype html><html><body><main data-loc="src/app/page.tsx:1:0">Landing</main></body></html>');
+    res.end(
+      '<!doctype html><html><head><script src="/_next/static/chunks/app.js"></script></head><body><main data-loc="src/app/page.tsx:1:0">Landing</main></body></html>',
+    );
   });
   server.on('upgrade', (req, socket) => {
     upgrades.push(req.url ?? '/');

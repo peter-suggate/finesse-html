@@ -3,6 +3,7 @@ import type { FileMeta, OffsetMap } from '../../shared/protocol';
 export interface InjectionPayload {
   offsetMap: OffsetMap | null;
   fileMeta: FileMeta;
+  cookieCompat?: boolean;
 }
 
 /**
@@ -75,6 +76,28 @@ const EARLY_ERROR_BRIDGE = `<script>
 })();
 </script>`;
 const RUNTIME_SCRIPT_TAG = '<script src="/__edit/runtime.js"></script>';
+const IFRAME_COOKIE_COMPAT = `<script>
+(function(){
+  if (window.__FINESSE_COOKIE_COMPAT_INSTALLED__) return;
+  window.__FINESSE_COOKIE_COMPAT_INSTALLED__ = true;
+  var proto = Document.prototype;
+  var descriptor = Object.getOwnPropertyDescriptor(proto, 'cookie');
+  if (!descriptor || !descriptor.configurable || !descriptor.get || !descriptor.set) return;
+  function normalizeCookie(value) {
+    var parts = String(value).split(';').map(function(part){ return part.trim(); }).filter(Boolean);
+    if (parts.length === 0) return value;
+    var attrs = parts.slice(1).filter(function(part){ return !/^samesite=/i.test(part); });
+    var hasSecure = attrs.some(function(part){ return /^secure$/i.test(part); });
+    return [parts[0]].concat(attrs, ['SameSite=None'], hasSecure ? [] : ['Secure']).join('; ');
+  }
+  Object.defineProperty(proto, 'cookie', {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get: function(){ return descriptor.get.call(this); },
+    set: function(value){ return descriptor.set.call(this, normalizeCookie(value)); }
+  });
+})();
+</script>`;
 
 function jsonForScript(value: unknown): string {
   // Escape "</" sequences inside JSON strings so a payload can't break out of <script>.
@@ -84,6 +107,9 @@ function jsonForScript(value: unknown): string {
 export function injectInstrumentation(html: string, payload: InjectionPayload): string {
   const initScript = `<script>window.__FINESSE__ = ${jsonForScript(payload)};</script>`;
   const injected = `\n${initScript}\n${EARLY_ERROR_BRIDGE}\n${RUNTIME_SCRIPT_TAG}\n`;
+  if (payload.cookieCompat) {
+    html = injectIntoHead(html, IFRAME_COOKIE_COMPAT);
+  }
   const bodyClose = lastMatchIndex(html, /<\/body\s*>/i);
   if (bodyClose >= 0) {
     return html.slice(0, bodyClose) + injected + html.slice(bodyClose);
@@ -93,6 +119,20 @@ export function injectInstrumentation(html: string, payload: InjectionPayload): 
     return html.slice(0, htmlClose) + injected + html.slice(htmlClose);
   }
   return html + injected;
+}
+
+function injectIntoHead(html: string, script: string): string {
+  const headOpen = /<head\b[^>]*>/i.exec(html);
+  if (headOpen) {
+    const pos = headOpen.index + headOpen[0].length;
+    return html.slice(0, pos) + '\n' + script + html.slice(pos);
+  }
+  const htmlOpen = /<html\b[^>]*>/i.exec(html);
+  if (htmlOpen) {
+    const pos = htmlOpen.index + htmlOpen[0].length;
+    return html.slice(0, pos) + '\n' + script + html.slice(pos);
+  }
+  return script + html;
 }
 
 function lastMatchIndex(haystack: string, pattern: RegExp): number {

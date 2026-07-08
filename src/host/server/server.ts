@@ -211,6 +211,7 @@ class PreviewServerImpl implements PreviewServer {
               isTemplated: false,
               renderMode: 'react',
             },
+            cookieCompat: true,
           });
           res.writeHead(proxyRes.statusCode ?? 200, {
             ...proxyRewrittenHtmlHeaders(proxyRes.headers),
@@ -415,9 +416,30 @@ function proxyPassThroughHeaders(headers: http.IncomingHttpHeaders): http.Outgoi
     ...headers,
     'access-control-allow-origin': '*',
   };
+  const setCookie = rewriteSetCookieForPreviewIframe(headers['set-cookie']);
+  if (setCookie) out['set-cookie'] = setCookie;
   delete out['content-security-policy'];
   delete out['x-frame-options'];
   return out;
+}
+
+function rewriteSetCookieForPreviewIframe(
+  setCookie: string | string[] | undefined,
+): string[] | undefined {
+  if (!setCookie) return undefined;
+  const cookies = Array.isArray(setCookie) ? setCookie : [setCookie];
+  return cookies.map((cookie) => {
+    const parts = cookie.split(';').map((part) => part.trim());
+    const [nameValue, ...attrs] = parts;
+    const withoutSameSite = attrs.filter((attr) => !/^samesite=/i.test(attr));
+    const hasSecure = withoutSameSite.some((attr) => /^secure$/i.test(attr));
+    return [
+      nameValue,
+      ...withoutSameSite,
+      'SameSite=None',
+      ...(hasSecure ? [] : ['Secure']),
+    ].join('; ');
+  });
 }
 
 function proxyRequestHeaders(
