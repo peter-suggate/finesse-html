@@ -8,6 +8,7 @@
  *   - Hand off button clicks to the action layer (Phase 3+).
  */
 
+import { modKey } from '../../shared/keys';
 import type { EditSession, EditState } from '../editSession';
 import { setupCrumbs, type CrumbsHandle } from './breadcrumbs';
 import { buildToolbar, type ButtonSpec, type ToolbarHandle } from './element';
@@ -88,13 +89,19 @@ export const DEFAULT_SPECS: readonly ButtonSpec[] = [
     ],
   },
   { name: 'sepWeight', kind: 'separator', label: '' },
-  { name: 'bold', kind: 'toggle', label: 'Bold', icon: ICONS.bold, shortcut: '⌘B' },
-  { name: 'italic', kind: 'toggle', label: 'Italic', icon: ICONS.italic, shortcut: '⌘I' },
-  { name: 'underline', kind: 'toggle', label: 'Underline', icon: ICONS.underline, shortcut: '⌘U' },
+  { name: 'bold', kind: 'toggle', label: 'Bold', icon: ICONS.bold, shortcut: modKey('B') },
+  { name: 'italic', kind: 'toggle', label: 'Italic', icon: ICONS.italic, shortcut: modKey('I') },
+  {
+    name: 'underline',
+    kind: 'toggle',
+    label: 'Underline',
+    icon: ICONS.underline,
+    shortcut: modKey('U'),
+  },
   { name: 'strike', kind: 'toggle', label: 'Strikethrough', icon: ICONS.strike },
-  { name: 'code', kind: 'toggle', label: 'Inline code', icon: ICONS.code, shortcut: '⌘E' },
+  { name: 'code', kind: 'toggle', label: 'Inline code', icon: ICONS.code, shortcut: modKey('E') },
   { name: 'sep2', kind: 'separator', label: '' },
-  { name: 'link', kind: 'action', label: 'Link', icon: ICONS.link, shortcut: '⌘K' },
+  { name: 'link', kind: 'action', label: 'Link', icon: ICONS.link, shortcut: modKey('K') },
   { name: 'clear', kind: 'action', label: 'Clear formatting', icon: ICONS.clear },
   { name: 'sep3', kind: 'separator', label: '' },
   { name: 'delete', kind: 'action', label: 'Delete element', icon: ICONS.trash },

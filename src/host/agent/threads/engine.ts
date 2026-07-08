@@ -97,6 +97,8 @@ export function createThreadEngine(opts: ThreadEngineOpts): ThreadEngine {
   const runQueue: string[] = [];
   let activeId: string | null = null;
   let activeAbort: AbortController | null = null;
+  // Monotonic per-engine so ordinals never renumber after deletes.
+  let nextOrdinal = 1;
 
   function notify(): void {
     opts.onChange();
@@ -111,6 +113,7 @@ export function createThreadEngine(opts: ThreadEngineOpts): ThreadEngine {
       id: genId(),
       anchor: input.anchor,
       status: 'idle',
+      ordinal: nextOrdinal++,
       providerId: input.providerId,
       prompts: [steerMessage(input.prompt, false)],
       runLogTail: '',
@@ -128,7 +131,10 @@ export function createThreadEngine(opts: ThreadEngineOpts): ThreadEngine {
       thread.status === 'running' || thread.status === 'queued'
         ? 'idle'
         : thread.status;
-    threads.set(thread.id, { ...thread, status });
+    // Keep restored ordinals stable and make sure new threads number after them.
+    const ordinal = thread.ordinal ?? nextOrdinal++;
+    if (ordinal >= nextOrdinal) nextOrdinal = ordinal + 1;
+    threads.set(thread.id, { ...thread, status, ordinal });
   }
 
   function steer(threadId: string, text: string): void {

@@ -1,22 +1,23 @@
 /**
- * Inline Ask Agent panel — pinned to the bottom of the side dock.
+ * AI panel — owns the dock's AI tab.
  *
- * Composer-first layout: the prompt input is the visual anchor. Last run stays
- * visible as a turn above the composer rather than swapping the panel into a
- * separate "run" mode. Provider switching, disconnect, and conversation reset
- * live behind a single overflow menu so the resting state stays uncluttered.
+ * Composer-first layout: the prompt input stays pinned at the bottom; the
+ * space above it is the conversation — a roster of lingering edit threads,
+ * each carrying its full instruction history (initial prompt + steers), live
+ * run output, and lifecycle actions. Provider switching, disconnect, and
+ * housekeeping live behind a single overflow menu so the resting state stays
+ * uncluttered.
  *
  * States the panel handles:
  *   - disconnected: provider needs a credential we don't yet have.
  *     Shows two provider buttons and an inline key input (collapsed by default).
  *   - idle: connected, no run in flight. Just composer + target chip.
- *   - running / done / error: composer stays present below a turn block
- *     showing the prompt, status, streaming output, and inline actions
- *     (retry on error, dismiss on done).
+ *   - threads: one card per edit; the newest card auto-expands and streams.
  *
  * Themed with VS Code CSS variables to match the surrounding chrome.
  */
 
+import { modKey, SEND_KEY_LABEL } from '../../shared/keys';
 import type {
   AgentThreadRunStatus,
   EditThreadView,
@@ -98,12 +99,31 @@ const PROVIDERS: Record<AgentProviderId, ProviderMeta> = {
   },
 };
 
+/** Friendly display names for raw model ids shown in the rail/menu. */
+const MODEL_NAMES: Record<string, string> = {
+  'claude-fable-5': 'Fable 5',
+  'claude-opus-4-8': 'Opus 4.8',
+  'claude-opus-4-7': 'Opus 4.7',
+  'claude-sonnet-5': 'Sonnet 5',
+  'claude-sonnet-4-6': 'Sonnet 4.6',
+  'claude-haiku-4-5': 'Haiku 4.5',
+  opus: 'Opus',
+  sonnet: 'Sonnet',
+  haiku: 'Haiku',
+  'composer-2': 'Composer 2',
+  'composer-1': 'Composer 1',
+};
+
+function modelDisplayName(model: string): string {
+  return MODEL_NAMES[model] ?? MODEL_NAMES[model.replace(/-\d{8}$/, '')] ?? model;
+}
+
 export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController {
   injectCss();
 
   const root = document.createElement('section');
   root.className = 'ap-root';
-  root.setAttribute('aria-label', 'Ask Agent');
+  root.setAttribute('aria-label', 'AI edits');
 
   // The conversation area shows the last submitted prompt and the agent's
   // streamed output as stacked turns. It scrolls; the composer stays pinned.
@@ -182,13 +202,28 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     const wrap = document.createElement('div');
     wrap.className = 'ap-roster';
 
-    const heading = document.createElement('div');
-    heading.className = 'ap-roster-head';
-    heading.textContent = `Edits (${threads.length})`;
-    wrap.appendChild(heading);
+    const head = document.createElement('div');
+    head.className = 'ap-roster-head';
+    const heading = document.createElement('span');
+    heading.className = 'ap-roster-title';
+    heading.textContent = `Edits · ${threads.length}`;
+    head.appendChild(heading);
+    const anyBusy = threads.some((t) => t.status === 'running' || t.status === 'queued');
+    if (!anyBusy) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'ap-btn-link ap-roster-clear';
+      clear.textContent = 'Clear all';
+      clear.title = 'Remove every edit pin. Changes already made to the file stay.';
+      clear.addEventListener('click', () => {
+        for (const thread of [...threads]) removeThread(thread);
+      });
+      head.appendChild(clear);
+    }
+    wrap.appendChild(head);
 
     threads.forEach((thread, i) => {
-      wrap.appendChild(renderThreadCard(thread, i + 1));
+      wrap.appendChild(renderThreadCard(thread, thread.ordinal ?? i + 1));
     });
     return wrap;
   }
@@ -204,6 +239,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     const summary = document.createElement('button');
     summary.type = 'button';
     summary.className = 'ap-thread-summary';
+    summary.setAttribute('aria-expanded', expanded ? 'true' : 'false');
     summary.addEventListener('click', () => {
       expandedThreadId = expanded ? null : thread.id;
       // Focusing a thread highlights its pin in the preview.
@@ -218,9 +254,12 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
 
     const label = document.createElement('span');
     label.className = 'ap-thread-label';
-    label.textContent =
-      `${thread.tagName}` + (thread.textPreview ? ` · ${thread.textPreview.slice(0, 28)}` : '');
-    label.title = thread.textPreview || thread.tagName;
+    // Lead with what the user asked for; fall back to the target element.
+    const firstPrompt = thread.prompts?.[0]?.text ?? '';
+    label.textContent = firstPrompt
+      ? firstPrompt
+      : `${thread.tagName}` + (thread.textPreview ? ` · ${thread.textPreview.slice(0, 28)}` : '');
+    label.title = firstPrompt || thread.textPreview || thread.tagName;
     summary.appendChild(label);
 
     const chip = document.createElement('span');
@@ -236,15 +275,59 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     return card;
   }
 
+  /** The instruction trail: target element, initial prompt, then steers. */
+  function renderThreadHistory(thread: EditThreadView): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'ap-thread-history';
+
+    const target = document.createElement('div');
+    target.className = 'ap-thread-target';
+    target.textContent =
+      thread.tagName + (thread.textPreview ? ` · “${thread.textPreview.slice(0, 60)}”` : '');
+    target.title = thread.textPreview || thread.tagName;
+    wrap.appendChild(target);
+
+    const prompts = thread.prompts ?? [];
+    prompts.forEach((p, i) => {
+      const row = document.createElement('div');
+      row.className = 'ap-thread-prompt';
+      if (i > 0) row.classList.add('is-steer');
+      const tag = document.createElement('span');
+      tag.className = 'ap-thread-prompt-tag';
+      tag.textContent = i === 0 ? 'You' : 'Steer';
+      row.appendChild(tag);
+      const text = document.createElement('span');
+      text.className = 'ap-thread-prompt-text';
+      text.textContent = p.text;
+      row.appendChild(text);
+      wrap.appendChild(row);
+    });
+    return wrap;
+  }
+
   function renderThreadBody(thread: EditThreadView): HTMLElement {
     const body = document.createElement('div');
     body.className = 'ap-thread-body';
+
+    body.appendChild(renderThreadHistory(thread));
 
     if (thread.error) {
       const err = document.createElement('div');
       err.className = 'ap-thread-error';
       err.textContent = thread.error;
       body.appendChild(err);
+      // Auth failures get a one-click recovery path right on the card.
+      if (thread.errorKind === 'auth') {
+        const reconnect = document.createElement('button');
+        reconnect.type = 'button';
+        reconnect.className = 'ap-btn-primary';
+        reconnect.textContent =
+          thread.providerId === 'claude-code' ? 'Re-login to Claude' : 'Reconnect Cursor';
+        reconnect.addEventListener('click', () =>
+          opts.actions.onConnectProvider(thread.providerId),
+        );
+        body.appendChild(reconnect);
+      }
     }
     if (thread.runLogTail) {
       const log = document.createElement('pre');
@@ -296,22 +379,23 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
         ),
       );
     } else if (terminal) {
-      // The agent already wrote the file. "Accept" clears the pin/card and
-      // keeps the changes; "Re-run" applies any new steering on top.
-      actions.appendChild(threadBtn('Accept', 'primary', () => removeThread(thread)));
+      // The agent already wrote the file, so finishing a thread is just
+      // housekeeping: "Done" clears the pin/card, the changes stay. "Re-run"
+      // applies any new steering on top.
+      actions.appendChild(threadBtn('Done', 'primary', () => removeThread(thread)));
       actions.appendChild(threadBtn('Re-run', 'ghost', () => steerAndRun(thread)));
     } else if (failed) {
       actions.appendChild(threadBtn('Retry', 'primary', () => steerAndRun(thread)));
     }
-    actions.appendChild(
-      threadBtn(terminal ? 'Discard' : 'Remove', 'link', () => removeThread(thread)),
-    );
+    if (!terminal) {
+      actions.appendChild(threadBtn('Remove pin', 'link', () => removeThread(thread)));
+    }
     body.appendChild(actions);
 
     if (terminal || failed) {
       const hint = document.createElement('div');
       hint.className = 'ap-thread-hint';
-      hint.textContent = 'Accepting keeps the edits in your file. Undo with ⌘Z if needed.';
+      hint.textContent = `The file already has these changes — clearing the pin keeps them. Undo with ${modKey('Z')} if needed.`;
       body.appendChild(hint);
     }
     return body;
@@ -509,16 +593,19 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
       btn.type = 'button';
       btn.className =
         'ap-choice' + (state.providerId === id ? ' is-active' : '');
-      btn.textContent = meta.shortLabel;
+      btn.textContent = `Connect ${meta.shortLabel}`;
       btn.setAttribute(
         'aria-pressed',
         state.providerId === id ? 'true' : 'false',
       );
       btn.addEventListener('click', () => {
-        if (state.providerId === id) return;
+        // One click means "use this agent": select it AND run its connect
+        // flow (CLI-login detection for Claude, key prompt for Cursor) —
+        // not a silent selection the user has to follow up on.
         showKeyInput = false;
         pendingKey = '';
-        opts.actions.onSelectProvider(id);
+        if (state.providerId !== id) opts.actions.onSelectProvider(id);
+        opts.actions.onConnectProvider(id);
       });
       choices.appendChild(btn);
     }
@@ -633,10 +720,10 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     const send = document.createElement('button');
     send.type = 'button';
     send.className = 'ap-send';
-    send.setAttribute('aria-label', 'Send prompt (⌘↩)');
+    send.setAttribute('aria-label', `Send prompt (${SEND_KEY_LABEL})`);
     send.title = state.agentRunning
-      ? 'Queue another edit (⌘↩)'
-      : 'Send prompt (⌘↩)';
+      ? `Queue another edit (${SEND_KEY_LABEL})`
+      : `Send prompt (${SEND_KEY_LABEL})`;
     send.innerHTML = SEND_ICON;
     send.disabled = textarea.value.trim().length === 0;
 
@@ -694,7 +781,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
     if (state.model) {
       const model = document.createElement('span');
       model.className = 'ap-rail-model';
-      model.textContent = state.model;
+      model.textContent = modelDisplayName(state.model);
       model.title = `Model: ${state.model}`;
       providerBadge.appendChild(model);
     }
@@ -709,7 +796,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
 
     const hint = document.createElement('span');
     hint.className = 'ap-rail-hint';
-    hint.textContent = '⌘↩';
+    hint.textContent = SEND_KEY_LABEL;
     rail.appendChild(hint);
 
     const overflow = document.createElement('button');
@@ -740,7 +827,7 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
 
     addMenuItem(
       menu,
-      state.model ? `Change model (${state.model})…` : 'Change model…',
+      state.model ? `Change model (${modelDisplayName(state.model)})…` : 'Change model…',
       () => {
         menuOpen = false;
         render();
@@ -835,8 +922,15 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
   }
 
   function setThreads(next: EditThreadView[], nextActiveId: string | null): void {
+    // Auto-expand a brand-new thread so the run the user just kicked off
+    // streams in front of them instead of hiding behind a collapsed card.
+    const previousIds = new Set(threads.map((t) => t.id));
+    const fresh = next.filter((t) => !previousIds.has(t.id));
     threads = next;
     activeThreadId = nextActiveId;
+    if (fresh.length > 0 && !isTypingIntoCard()) {
+      expandedThreadId = fresh[fresh.length - 1].id;
+    }
     // Drop drafts/expansion for threads that no longer exist.
     const ids = new Set(next.map((t) => t.id));
     if (expandedThreadId && !ids.has(expandedThreadId)) expandedThreadId = null;
@@ -844,6 +938,12 @@ export function setupAgentPanel(opts: SetupAgentPanelOpts): AgentPanelController
       if (!ids.has(id)) threadDrafts.delete(id);
     }
     render();
+  }
+
+  /** True while the user is typing into an expanded card's steer box. */
+  function isTypingIntoCard(): boolean {
+    const active = document.activeElement;
+    return active instanceof HTMLElement && active.classList.contains('ap-thread-input');
   }
 
   function applyThreadRunStatus(_status: AgentThreadRunStatus): void {
@@ -913,13 +1013,11 @@ const AP_CSS = `
 .ap-root {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
-  max-height: 60%;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+  flex: 1 1 auto;
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
   color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground));
   font-family: var(--vscode-font-family);
-  font-size: 12px;
+  font-size: 13px;
   min-height: 0;
   overflow: hidden;
 }
@@ -930,8 +1028,8 @@ const AP_CSS = `
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 10px 4px 10px;
+  gap: 10px;
+  padding: 12px 14px 6px 14px;
 }
 .ap-conversation::-webkit-scrollbar { width: 8px; }
 .ap-conversation::-webkit-scrollbar-thumb {
@@ -943,16 +1041,23 @@ const AP_CSS = `
 .ap-roster {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 7px;
 }
 .ap-roster-head {
-  font-size: 10px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+}
+.ap-roster-title {
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  opacity: 0.55;
-  padding: 0 2px;
+  opacity: 0.6;
 }
+.ap-roster-clear { font-size: 11.5px; }
 .ap-thread {
   border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
   border-radius: 6px;
@@ -965,9 +1070,9 @@ const AP_CSS = `
 .ap-thread-summary {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 8px 10px;
   background: transparent;
   border: none;
   color: inherit;
@@ -978,13 +1083,13 @@ const AP_CSS = `
 .ap-thread-summary:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.1)); }
 .ap-thread-dot {
   flex: 0 0 auto;
-  width: 17px;
-  height: 17px;
+  width: 19px;
+  height: 19px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   color: #fff;
   background: var(--vscode-descriptionForeground, #777);
@@ -998,18 +1103,18 @@ const AP_CSS = `
 .ap-thread[data-status="stale"]   .ap-thread-dot { background: #b9772b; }
 .ap-thread-label {
   flex: 1;
-  font-size: 11.5px;
+  font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ap-thread-chip {
   flex: 0 0 auto;
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 9px;
   background: var(--vscode-badge-background, rgba(128,128,128,0.2));
   color: var(--vscode-badge-foreground, inherit);
@@ -1022,11 +1127,47 @@ const AP_CSS = `
 .ap-thread-body {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  padding: 0 10px 10px 10px;
+}
+
+/* Instruction trail: target element, then You/Steer rows. */
+.ap-thread-history {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ap-thread-target {
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  opacity: 0.65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-thread-prompt {
+  display: flex;
+  align-items: baseline;
   gap: 6px;
-  padding: 0 8px 8px 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.ap-thread-prompt-tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  min-width: 34px;
+}
+.ap-thread-prompt.is-steer .ap-thread-prompt-text { opacity: 0.85; }
+.ap-thread-prompt-text {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .ap-thread-error {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--vscode-errorForeground, #e06c6c);
   background: var(--vscode-inputValidation-errorBackground, rgba(224,108,108,0.08));
   border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(224,108,108,0.4));
@@ -1036,20 +1177,20 @@ const AP_CSS = `
 }
 .ap-thread-log {
   margin: 0;
-  max-height: 150px;
+  max-height: 180px;
   overflow: auto;
   background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.22));
   border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
   border-radius: 4px;
   padding: 6px 8px;
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 10.5px;
+  font-size: 11.5px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .ap-thread-input {
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--vscode-input-foreground, inherit);
   background: var(--vscode-input-background, rgba(0,0,0,0.06));
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
@@ -1063,13 +1204,18 @@ const AP_CSS = `
 .ap-thread-actions {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
 }
-.ap-thread-actions .ap-btn-link { margin-left: auto; color: var(--vscode-errorForeground, #e06c6c); }
+/* "Remove pin" is housekeeping, not destruction — keep it quiet. */
+.ap-thread-actions .ap-btn-link {
+  margin-left: auto;
+  color: var(--vscode-descriptionForeground, inherit);
+}
+.ap-thread-actions .ap-btn-link:hover { color: var(--vscode-foreground, inherit); }
 .ap-thread-hint {
-  font-size: 10.5px;
-  line-height: 1.4;
-  opacity: 0.6;
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 0.65;
 }
 
 .ap-turn {
@@ -1081,7 +1227,7 @@ const AP_CSS = `
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10.5px;
+  font-size: 11px;
   opacity: 0.7;
 }
 .ap-turn-role { font-weight: 600; letter-spacing: 0.02em; }
@@ -1110,7 +1256,7 @@ const AP_CSS = `
   opacity: 1;
 }
 .ap-turn-user .ap-turn-body {
-  font-size: 11.5px;
+  font-size: 12.5px;
   line-height: 1.45;
   padding: 6px 8px;
   border-radius: 4px;
@@ -1120,7 +1266,7 @@ const AP_CSS = `
   word-wrap: break-word;
 }
 .ap-turn-error {
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--vscode-errorForeground, #e06c6c);
   white-space: pre-wrap;
   padding: 6px 8px;
@@ -1137,7 +1283,7 @@ const AP_CSS = `
   border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
   border-radius: 4px;
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
+  font-size: 11.5px;
   white-space: pre-wrap;
   word-wrap: break-word;
 }
@@ -1161,7 +1307,7 @@ const AP_CSS = `
 
 .ap-dock {
   flex: 0 0 auto;
-  padding: 8px 10px 10px 10px;
+  padding: 8px 14px 12px 14px;
   border-top: 1px solid transparent;
 }
 .ap-root[data-has-turn="true"] .ap-dock {
@@ -1180,9 +1326,9 @@ const AP_CSS = `
   align-items: center;
   gap: 4px;
   max-width: 100%;
-  padding: 2px 7px;
+  padding: 3px 8px;
   border-radius: 10px;
-  font-size: 10.5px;
+  font-size: 11.5px;
   line-height: 1.4;
   background: var(--vscode-badge-background, rgba(128,128,128,0.18));
   color: var(--vscode-badge-foreground, inherit);
@@ -1196,7 +1342,7 @@ const AP_CSS = `
 .ap-chip-icon { font-size: 10px; opacity: 0.8; }
 .ap-chip-label {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 10.5px;
+  font-size: 11.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1217,7 +1363,7 @@ const AP_CSS = `
 .ap-textarea {
   flex: 1;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
   color: var(--vscode-input-foreground, inherit);
   background: transparent;
@@ -1266,9 +1412,9 @@ const AP_CSS = `
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 2px 0 2px;
-  font-size: 10.5px;
-  opacity: 0.85;
+  padding: 5px 2px 0 2px;
+  font-size: 11.5px;
+  opacity: 0.9;
 }
 .ap-rail-provider {
   display: inline-flex;
@@ -1278,7 +1424,7 @@ const AP_CSS = `
   border: none;
   color: inherit;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 11.5px;
   padding: 2px 4px;
   border-radius: 3px;
   cursor: pointer;
@@ -1303,14 +1449,14 @@ const AP_CSS = `
   100% { box-shadow: 0 0 0 5px rgba(217,168,58,0); }
 }
 .ap-rail-tag {
-  font-size: 9.5px;
+  font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   opacity: 0.7;
 }
 .ap-rail-model {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 9.5px;
+  font-size: 10.5px;
   opacity: 0.6;
   max-width: 130px;
   overflow: hidden;
@@ -1319,7 +1465,7 @@ const AP_CSS = `
 }
 .ap-rail-hint {
   margin-left: auto;
-  font-size: 10px;
+  font-size: 11px;
   opacity: 0.45;
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
 }
@@ -1359,8 +1505,8 @@ const AP_CSS = `
   border: none;
   color: inherit;
   font: inherit;
-  font-size: 11.5px;
-  padding: 5px 8px;
+  font-size: 12.5px;
+  padding: 6px 9px;
   border-radius: 3px;
   cursor: pointer;
 }
@@ -1376,11 +1522,11 @@ const AP_CSS = `
   gap: 7px;
 }
 .ap-connect-heading {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .ap-connect-sub {
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.7;
   line-height: 1.4;
 }
@@ -1391,8 +1537,8 @@ const AP_CSS = `
 }
 .ap-choice {
   font: inherit;
-  font-size: 11.5px;
-  padding: 6px 8px;
+  font-size: 12.5px;
+  padding: 7px 9px;
   background: var(--vscode-input-background, transparent);
   color: inherit;
   border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
@@ -1425,7 +1571,7 @@ const AP_CSS = `
 /* ---------- Shared atoms ---------- */
 .ap-input {
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--vscode-input-foreground, inherit);
   background: var(--vscode-input-background, transparent);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
@@ -1438,12 +1584,12 @@ const AP_CSS = `
 
 .ap-btn-primary {
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #ffffff);
   border: none;
   border-radius: 3px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   cursor: pointer;
 }
 .ap-btn-primary:hover:not(:disabled) {
@@ -1453,7 +1599,7 @@ const AP_CSS = `
 
 .ap-btn-ghost {
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   background: transparent;
   color: inherit;
   border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
@@ -1467,7 +1613,7 @@ const AP_CSS = `
 
 .ap-btn-link {
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   background: transparent;
   color: var(--vscode-textLink-foreground, #4cb6ff);
   border: none;

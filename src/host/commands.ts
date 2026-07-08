@@ -26,8 +26,8 @@ export function registerCommands(
   ctx: CommandsContext,
 ): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('finesse.openPreview', () =>
-      openPreview(context, ctx),
+    vscode.commands.registerCommand('finesse.openPreview', (uri?: vscode.Uri) =>
+      openPreview(context, ctx, uri),
     ),
     vscode.commands.registerCommand('finesse.openDevServerPreview', () =>
       openDevServerPreview(context, ctx),
@@ -75,15 +75,20 @@ export function isPreviewableLanguage(languageId: string): boolean {
 async function openPreview(
   extContext: vscode.ExtensionContext,
   ctx: CommandsContext,
+  uri?: vscode.Uri,
 ): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || !PREVIEWABLE_LANGUAGES.has(editor.document.languageId)) {
+  // Menu/keybinding invocations pass a resource URI; the palette passes none
+  // and we fall back to the active editor.
+  const doc =
+    uri instanceof vscode.Uri
+      ? await vscode.workspace.openTextDocument(uri)
+      : vscode.window.activeTextEditor?.document;
+  if (!doc || !PREVIEWABLE_LANGUAGES.has(doc.languageId)) {
     void vscode.window.showInformationMessage(
       'Open an HTML, JS, TS, JSX, or TSX file to preview.',
     );
     return;
   }
-  const doc = editor.document;
   const key = doc.uri.toString();
   const existing = ctx.getPanel(key);
   if (existing) {

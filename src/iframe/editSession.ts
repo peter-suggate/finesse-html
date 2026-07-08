@@ -82,6 +82,8 @@ export interface EditSession {
   requestRedo(): void;
   /** Ask the host to open Cursor/VS Code's command palette. */
   requestCommandPalette(): void;
+  /** Ask the surrounding webview chrome to toggle the side dock. */
+  requestToggleDock(): void;
   isLocked(): boolean;
   hasActiveBlock(): boolean;
   activeBlockElement(): HTMLElement | null;
@@ -559,6 +561,10 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     post({ type: 'commandPaletteRequest' });
   }
 
+  function requestToggleDock(): void {
+    post({ type: 'toggleDockRequest' });
+  }
+
   function selectElement(el: HTMLElement): void {
     if (isLocked()) return;
     if (!el.hasAttribute('tabindex')) {
@@ -910,6 +916,7 @@ export function setupEditSession(opts: SetupOpts): EditSession {
     requestUndo,
     requestRedo,
     requestCommandPalette,
+    requestToggleDock,
     isLocked,
     hasActiveBlock,
     activeBlockElement,

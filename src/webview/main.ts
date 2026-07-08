@@ -11,6 +11,7 @@ import type {
 } from '../shared/protocol';
 import { setupSidePanel, type SidePanelController } from './stylePanel';
 import { setupAgentPanel, type AgentPanelController } from './agentPanel';
+import { setupDock, type DockController } from './dock';
 import {
   dismissPreviewLoadErrorBanner,
   dismissAll,
@@ -23,6 +24,7 @@ import {
   showTemplatedBanner,
 } from './banners';
 import { initStatus, updateStatus } from './status';
+import { buildThemeMessage, watchThemeChanges } from './theme';
 
 interface InitData {
   iframeUrl: string;
@@ -45,6 +47,8 @@ declare const acquireVsCodeApi: () => VsCodeApi;
 
 const vscode = acquireVsCodeApi();
 const init = window.__FINESSE_INIT__;
+
+let dockController: DockController | null = null;
 
 const banners = document.getElementById('banners');
 if (banners) initBanners(banners);
@@ -172,13 +176,20 @@ function bootIframe(init: InitData): void {
   // agent panel pinned to the bottom. The style panel posts PanelStyleEdit
   // messages directly into the iframe; the iframe applies optimistically and
   // forwards the canonical commit to the host.
-  const dock = document.getElementById('side-dock');
+  dockController = setupDock(vscode);
+  // The tab panes come from the host-generated HTML. If this script is newer
+  // than the running extension host (freshly installed, window not yet
+  // reloaded), the old HTML won't have them — fall back to the legacy shared
+  // container so the panels still mount instead of leaving a blank dock.
+  const legacyDock = document.getElementById('dock-panels');
+  const aiPane = document.getElementById('dock-pane-ai') ?? legacyDock;
+  const designPane = document.getElementById('dock-pane-design') ?? legacyDock;
   let sidePanel: SidePanelController | null = null;
   let agentPanel: AgentPanelController | null = null;
   let currentAgentProvider: AgentProviderId = 'cursor';
-  if (dock) {
+  if (designPane) {
     sidePanel = setupSidePanel({
-      host: dock,
+      host: designPane,
       sender: {
         toIframe(msg: PanelStyleEdit | PanelCssEdit | PanelSelectElement) {
           postToIframe(msg);
@@ -186,8 +197,10 @@ function bootIframe(init: InitData): void {
       },
     });
     sidePanel.setLocked(init.fileMeta.isTemplated);
+  }
+  if (aiPane) {
     agentPanel = setupAgentPanel({
-      host: dock,
+      host: aiPane,
       actions: {
         onOpenDashboard: () => post({ type: '__webview_action', action: 'openCursorDashboard' }),
         onOpenClaudeDocs: () => post({ type: '__webview_action', action: 'openClaudeDocs' }),
@@ -198,9 +211,10 @@ function bootIframe(init: InitData): void {
         onChangeModel: () => post({ type: '__webview_action', action: 'changeAgentModel' }),
         onSelectProvider: (providerId) => {
           currentAgentProvider = providerId;
+          // Reflect the switch locally, but let the host confirm connection —
+          // it posts agentConnectionState after every provider change.
           agentPanel?.setState({
             providerId,
-            connected: providerId === 'claude-code',
             connectionSource: undefined,
             runLog: '',
             runError: undefined,
@@ -258,15 +272,26 @@ function bootIframe(init: InitData): void {
   window.addEventListener('keydown', (e) => forwardBypassModifier(e, 'down'), true);
   window.addEventListener('keyup', (e) => forwardBypassModifier(e, 'up'), true);
 
+  // Re-send Finesse theme tokens whenever the user switches VS Code themes.
+  watchThemeChanges(() => postToIframe(buildThemeMessage()));
+
   function relayToIframe(msg: HostMessage): void {
     postToIframe(msg);
   }
 
   function handleIframeMessage(data: unknown): void {
     if (!isIframeMessage(data)) return;
+    if (data.type === 'toggleDockRequest') {
+      // Pure chrome concern — never forwarded to the host.
+      dockController?.toggle();
+      return;
+    }
     if (data.type === 'ready') {
       readyReceived = true;
       dismissPreviewLoadErrorBanner();
+      // Hand the freshly-loaded preview the current editor theme so the
+      // injected Finesse chrome matches VS Code from the first paint.
+      postToIframe(buildThemeMessage());
     }
     if (data.type === 'runtimeError') {
       showRuntimeErrorBanner({
@@ -279,7 +304,15 @@ function bootIframe(init: InitData): void {
       });
     }
     if (data.type === 'elementSelectionChanged') {
-      sidePanel?.setSelection(data.selection as ElementSelectionSnapshot | null);
+      const selection = data.selection as ElementSelectionSnapshot | null;
+      sidePanel?.setSelection(selection);
+      // Cue the hidden Design tab that there's a selection to style.
+      dockController?.setTabBadge('design', selection !== null);
+    }
+    if (data.type === 'threadActionRequest' && data.payload.kind === 'create') {
+      // Starting an AI edit from the preview: surface its card in the AI tab
+      // so the roster confirms the thread. Doesn't force the dock open.
+      dockController?.setTab('ai');
     }
     vscode.postMessage(data);
   }
@@ -378,6 +411,11 @@ function bootIframe(init: InitData): void {
         // Drive the in-preview pins and the side-dock roster from one snapshot.
         relayToIframe(data);
         agentPanel?.setThreads(data.threads, data.activeThreadId);
+        // Cue the hidden AI tab while any edit is in flight.
+        dockController?.setTabBadge(
+          'ai',
+          data.threads.some((t) => t.status === 'running' || t.status === 'queued'),
+        );
         break;
       case 'agentThreadRunStatus':
         relayToIframe(data);
@@ -429,6 +467,18 @@ window.addEventListener(
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
       e.preventDefault();
       requestCommandPalette();
+      return;
+    }
+    // ⌘. is the documented panel toggle; ⌘\ stays as a legacy alias (it
+    // shadows VS Code's "split editor" only while the preview is focused).
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.shiftKey &&
+      !e.altKey &&
+      (e.key === '.' || e.key === '\\')
+    ) {
+      e.preventDefault();
+      dockController?.toggle();
     }
   },
   true,
@@ -451,6 +501,7 @@ function isIframeMessage(data: unknown): data is IframeMessage {
     t === 'undoRequest' ||
     t === 'redoRequest' ||
     t === 'commandPaletteRequest' ||
+    t === 'toggleDockRequest' ||
     t === 'elementSelectionChanged' ||
     t === 'anchorResolved' ||
     t === 'threadPinRects' ||

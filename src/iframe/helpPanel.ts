@@ -7,6 +7,7 @@
  * active so it doesn't compete with the format toolbar.
  */
 
+import { SHIFT, modKey, shiftModKey } from '../shared/keys';
 import type { EditSession, EditState } from './editSession';
 
 const PANEL_ID = 'finesse-help-panel';
@@ -19,11 +20,6 @@ const FADE_END = 80;
 const MIN_OPACITY = 0.08;
 const MAX_OPACITY = 0.92;
 
-const isMac =
-  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform);
-const MOD = isMac ? '⌘' : 'Ctrl';
-const SHIFT = isMac ? '⇧' : 'Shift';
-
 interface Row {
   keys: string[];
   label: string;
@@ -31,15 +27,17 @@ interface Row {
 
 const ROWS: readonly Row[] = [
   { keys: ['Click'], label: 'Edit text' },
+  { keys: ['✦'], label: 'Ask AI (select first)' },
   { keys: [SHIFT, 'Click'], label: 'Use link / button' },
   { keys: [SHIFT, SHIFT], label: 'Toggle interactive' },
   { keys: ['Tab'], label: 'Next element' },
   { keys: ['Enter'], label: 'Edit focused' },
-  { keys: ['Del'], label: 'Remove' },
-  { keys: [`${MOD}S`], label: 'Save' },
-  { keys: [`${MOD}Z`], label: 'Undo' },
-  { keys: [`${MOD}${SHIFT}Z`], label: 'Redo' },
-  { keys: ['Esc'], label: 'Cancel' },
+  { keys: ['Del'], label: 'Remove selected' },
+  { keys: [modKey('S')], label: 'Save' },
+  { keys: [modKey('Z')], label: 'Undo' },
+  { keys: [shiftModKey('Z')], label: 'Redo' },
+  { keys: [modKey('.')], label: 'Toggle side panel' },
+  { keys: ['Esc'], label: 'Deselect / exit' },
 ];
 
 export interface HelpPanelController {
@@ -158,11 +156,11 @@ function buildPanel(): PanelDom {
     minWidth: '170px',
     maxWidth: '240px',
     borderRadius: '8px',
-    border: '1px solid rgba(255, 255, 255, 0.10)',
-    background: 'rgba(20, 24, 32, 0.78)',
-    color: 'rgba(244, 247, 251, 0.92)',
-    boxShadow: '0 6px 20px rgba(0, 0, 0, 0.28)',
-    fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    border: '1px solid var(--finesse-surface-border)',
+    background: 'var(--finesse-surface)',
+    color: 'var(--finesse-surface-fg)',
+    boxShadow: 'var(--finesse-shadow-small)',
+    fontFamily: 'var(--finesse-font)',
     fontSize: '11px',
     lineHeight: '14px',
     backdropFilter: 'blur(10px)',
@@ -189,7 +187,7 @@ function buildPanel(): PanelDom {
     fontWeight: '600',
     letterSpacing: '0.08em',
     textTransform: 'uppercase',
-    color: 'rgba(244, 247, 251, 0.55)',
+    color: 'var(--finesse-muted)',
   } satisfies Partial<CSSStyleDeclaration>);
 
   const toggle = document.createElement('button');
@@ -199,9 +197,9 @@ function buildPanel(): PanelDom {
     width: '18px',
     height: '18px',
     padding: '0',
-    border: '1px solid rgba(255, 255, 255, 0.16)',
+    border: '1px solid var(--finesse-surface-border)',
     borderRadius: '4px',
-    background: 'rgba(255, 255, 255, 0.04)',
+    background: 'color-mix(in srgb, var(--finesse-surface-fg) 5%, transparent)',
     color: 'inherit',
     fontSize: '11px',
     lineHeight: '14px',
@@ -243,7 +241,7 @@ function buildPanel(): PanelDom {
     const label = document.createElement('div');
     label.textContent = row.label;
     Object.assign(label.style, {
-      color: 'rgba(244, 247, 251, 0.78)',
+      opacity: '0.85',
     } satisfies Partial<CSSStyleDeclaration>);
     body.appendChild(keys);
     body.appendChild(label);
@@ -265,13 +263,11 @@ function kbd(value: string): HTMLElement {
     minWidth: '14px',
     height: '15px',
     padding: '0 4px',
-    border: '1px solid rgba(255, 255, 255, 0.18)',
-    borderBottomColor: 'rgba(0, 0, 0, 0.36)',
+    border: '1px solid var(--finesse-surface-border)',
     borderRadius: '3px',
-    background: 'rgba(255, 255, 255, 0.07)',
+    background: 'color-mix(in srgb, var(--finesse-surface-fg) 8%, transparent)',
     color: 'inherit',
-    boxShadow: 'inset 0 -1px 0 rgba(0, 0, 0, 0.18)',
-    font: '10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    font: '10px/1 var(--finesse-mono)',
   } satisfies Partial<CSSStyleDeclaration>);
   return el;
 }

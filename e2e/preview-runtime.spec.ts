@@ -408,7 +408,8 @@ test('starts a fresh edit from the in-preview launcher on a selected element', a
     // Type a prompt and start the edit → emits a create threadActionRequest
     // carrying the element's selection snapshot.
     await draft.locator('.finesse-composer-input').fill('shorten this headline');
-    await draft.getByText('Start edit', { exact: true }).click();
+    // Label is platform-aware ("Start (⌘↩)" / "Start (Ctrl+↩)") — match the stem.
+    await draft.getByRole('button', { name: /^Start/ }).click();
 
     await waitForMessages(page, 'threadActionRequest', 1);
     const create = await page.evaluate(() => {

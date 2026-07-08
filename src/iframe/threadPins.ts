@@ -1,3 +1,4 @@
+import { modKey, SEND_KEY_LABEL } from '../shared/keys';
 import type {
   AgentThreadRunStatus,
   AgentThreadsState,
@@ -56,11 +57,14 @@ interface ComposerEls {
   title: HTMLElement;
   status: HTMLElement;
   target: HTMLElement;
+  history: HTMLElement;
   error: HTMLElement;
   log: HTMLElement;
   textarea: HTMLTextAreaElement;
   hint: HTMLElement;
   actions: HTMLElement;
+  /** Prompt count the history block was last built for. */
+  historyKey: number;
   /** Last status the action row was built for, so we rebuild only on change. */
   actionsKey: string;
 }
@@ -119,6 +123,10 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
   let lastSelectedEl: HTMLElement | null = null;
 
   function ordinalOf(threadId: string): number {
+    const view = threads.find((t) => t.id === threadId);
+    // Prefer the engine's stable ordinal so "Edit 2" never becomes "Edit 1"
+    // when an earlier thread is removed; index is a legacy fallback.
+    if (view?.ordinal !== undefined) return view.ordinal;
     return threads.findIndex((t) => t.id === threadId) + 1;
   }
 
@@ -182,6 +190,7 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
   function render(): void {
     const views = visibleThreads();
     const seen = new Set<string>();
+    let detachedCount = 0;
     const rects: Array<{
       threadId: string;
       rect: { x: number; y: number; width: number; height: number };
@@ -199,6 +208,7 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
         const r = el.getBoundingClientRect();
         pin.style.left = `${Math.max(2, r.left - 10)}px`;
         pin.style.top = `${Math.max(2, r.top - 10)}px`;
+        pin.style.right = 'auto';
         pin.style.bottom = 'auto';
         rects.push({
           threadId: view.id,
@@ -206,10 +216,15 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
           visible: true,
         });
       } else {
-        // Detached: park the pin in a corner stack so it stays reachable.
-        pin.style.left = `${12 + (ordinal - 1) * 30}px`;
-        pin.style.bottom = '52px';
-        pin.style.top = 'auto';
+        // Detached: park the pin in a top-right stack so it stays reachable
+        // without colliding with the help panel / interact toggle that own
+        // the bottom corners. Stack by detached order, not ordinal, so there
+        // are no gaps.
+        const slot = detachedCount++;
+        pin.style.left = 'auto';
+        pin.style.right = '12px';
+        pin.style.top = `${12 + slot * 30}px`;
+        pin.style.bottom = 'auto';
         rects.push({
           threadId: view.id,
           rect: { x: 0, y: 0, width: 0, height: 0 },
@@ -340,6 +355,10 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
     target.className = 'finesse-composer-target';
     root.appendChild(target);
 
+    const history = document.createElement('div');
+    history.className = 'finesse-composer-history';
+    root.appendChild(history);
+
     const error = document.createElement('div');
     error.className = 'finesse-composer-error';
     root.appendChild(error);
@@ -371,7 +390,21 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
     actions.className = 'finesse-composer-actions';
     root.appendChild(actions);
 
-    return { threadId, root, title, status, target, error, log, textarea, hint, actions, actionsKey: '' };
+    return {
+      threadId,
+      root,
+      title,
+      status,
+      target,
+      history,
+      error,
+      log,
+      textarea,
+      hint,
+      actions,
+      historyKey: -1,
+      actionsKey: '',
+    };
   }
 
   /** Update the composer's dynamic parts without recreating inputs/buttons. */
@@ -384,6 +417,27 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
 
     c.target.style.display = view.textPreview ? '' : 'none';
     c.target.textContent = view.textPreview ? `"${view.textPreview.slice(0, 80)}"` : '';
+
+    // Instruction trail (initial prompt + steers). Rebuilt only when the
+    // count changes so streaming updates never disturb it.
+    const prompts = view.prompts ?? [];
+    if (c.historyKey !== prompts.length) {
+      c.historyKey = prompts.length;
+      c.history.innerHTML = '';
+      prompts.forEach((p, i) => {
+        const row = document.createElement('div');
+        row.className = 'finesse-composer-prompt';
+        const tag = document.createElement('span');
+        tag.className = 'finesse-composer-prompt-tag';
+        tag.textContent = i === 0 ? 'You' : 'Steer';
+        row.appendChild(tag);
+        const text = document.createElement('span');
+        text.textContent = p.text;
+        row.appendChild(text);
+        c.history.appendChild(row);
+      });
+    }
+    c.history.style.display = prompts.length > 0 ? '' : 'none';
 
     c.error.style.display = view.error ? '' : 'none';
     c.error.textContent = view.error ?? '';
@@ -429,29 +483,25 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
           actionBtn('Resume', 'primary', () => sendAction({ kind: 'resume', threadId: view.id })),
         );
       } else if (terminal) {
-        // The agent already wrote the file. "Accept" just clears the pin;
-        // changes stay. "Re-run" applies any new steering on top.
-        c.actions.appendChild(acceptBtn(view));
+        // The agent already wrote the file, so this is housekeeping: "Done"
+        // clears the pin and the changes stay. "Re-run" applies any new
+        // steering on top.
+        c.actions.appendChild(actionBtn('Done', 'primary', () => removeThread(view)));
         c.actions.appendChild(actionBtn('Re-run', 'ghost', () => submitSteerAndRun(view)));
       } else if (failed) {
         c.actions.appendChild(actionBtn('Retry', 'primary', () => submitSteerAndRun(view)));
       }
-      // Removing/accepting always available as the trailing action.
-      c.actions.appendChild(
-        actionBtn(terminal ? 'Discard pin' : 'Remove', 'link', () => removeThread(view)),
-      );
+      if (!terminal) {
+        c.actions.appendChild(actionBtn('Remove pin', 'link', () => removeThread(view)));
+      }
     }
 
-    // Hint clarifies that removing keeps the file changes.
+    // Hint clarifies that clearing the pin keeps the file changes.
     const showHint = view.status === 'done' || view.status === 'error';
     c.hint.style.display = showHint ? '' : 'none';
     c.hint.textContent = showHint
-      ? 'Accepting keeps the edits in your file. Undo with ⌘Z if needed.'
+      ? `The file already has these changes — clearing the pin keeps them. Undo with ${modKey('Z')} if needed.`
       : '';
-  }
-
-  function acceptBtn(view: EditThreadView): HTMLButtonElement {
-    return actionBtn('Accept', 'primary', () => removeThread(view));
   }
 
   function removeThread(view: EditThreadView): void {
@@ -563,7 +613,7 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
     header.className = 'finesse-composer-head';
     const title = document.createElement('span');
     title.className = 'finesse-composer-title';
-    title.textContent = `New edit · ${selection.tagName}`;
+    title.textContent = `✦ Ask AI · ${selection.tagName}`;
     header.appendChild(title);
     const close = document.createElement('button');
     close.type = 'button';
@@ -587,7 +637,7 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
     const textarea = document.createElement('textarea');
     textarea.className = 'finesse-composer-input';
     textarea.rows = 2;
-    textarea.placeholder = 'Describe the edit for this element…';
+    textarea.placeholder = 'What should change on this element?';
     root.appendChild(textarea);
 
     const submit = (): void => {
@@ -611,7 +661,7 @@ export function setupThreadPins(opts: SetupThreadPinsOpts): ThreadPinsController
 
     const actions = document.createElement('div');
     actions.className = 'finesse-composer-actions';
-    actions.appendChild(actionBtn('Start edit', 'primary', submit));
+    actions.appendChild(actionBtn(`Start (${SEND_KEY_LABEL})`, 'primary', submit));
     actions.appendChild(actionBtn('Cancel', 'link', () => closeDraft()));
     root.appendChild(actions);
 
@@ -715,9 +765,9 @@ const PIN_CSS = `
   border-radius: 11px;
   background: var(--pin-color, #1e6fd9);
   color: #fff;
-  font: 600 11px/1 system-ui, -apple-system, sans-serif;
+  font: 600 11px/1 var(--finesse-font);
   cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.28);
+  box-shadow: var(--finesse-shadow-small);
   transition: transform 90ms ease, box-shadow 90ms ease, opacity 90ms ease;
 }
 .finesse-pin:hover { transform: scale(1.08); box-shadow: 0 3px 10px rgba(0,0,0,0.34); }
@@ -734,18 +784,20 @@ const PIN_CSS = `
 }
 @keyframes finesse-pin-spin { to { transform: rotate(360deg); } }
 
+/* The composer is a floating card that follows the editor theme via the
+ * --finesse-* tokens (forwarded from the webview; see theme.ts). */
 .finesse-composer {
   position: fixed;
   display: flex;
   flex-direction: column;
   gap: 7px;
   padding: 10px;
-  background: #1b1f27;
-  color: #e8ecf3;
-  border: 1px solid rgba(255,255,255,0.10);
+  background: var(--finesse-surface);
+  color: var(--finesse-surface-fg);
+  border: 1px solid var(--finesse-surface-border);
   border-radius: 9px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
-  font: 12px/1.45 system-ui, -apple-system, sans-serif;
+  box-shadow: var(--finesse-shadow);
+  font: 12.5px/1.45 var(--finesse-font);
 }
 .finesse-composer-head { display: flex; align-items: center; gap: 8px; }
 .finesse-composer-title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -756,40 +808,55 @@ const PIN_CSS = `
 }
 .finesse-composer-x:hover { opacity: 1; }
 .finesse-composer-target {
-  font: 11px/1.4 ui-monospace, SFMono-Regular, monospace;
-  color: #9fb3d1; opacity: 0.85;
+  font: 11px/1.4 var(--finesse-mono);
+  color: var(--finesse-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.finesse-composer-history {
+  display: flex; flex-direction: column; gap: 3px;
+  max-height: 110px; overflow-y: auto;
+}
+.finesse-composer-prompt {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 12px; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word;
+}
+.finesse-composer-prompt-tag {
+  flex: 0 0 auto; min-width: 34px;
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--finesse-muted);
+}
 .finesse-composer-error {
-  font-size: 11px; color: #ff9a9a;
-  background: rgba(209,69,69,0.12); border: 1px solid rgba(209,69,69,0.35);
+  font-size: 11.5px; color: var(--finesse-danger);
+  background: var(--finesse-danger-bg); border: 1px solid var(--finesse-danger-border);
   border-radius: 5px; padding: 5px 7px; white-space: pre-wrap;
 }
 .finesse-composer-log {
   margin: 0; max-height: 150px; overflow: auto;
-  background: rgba(0,0,0,0.32); border: 1px solid rgba(255,255,255,0.07);
+  background: rgba(0,0,0,0.25); border: 1px solid var(--finesse-surface-border);
   border-radius: 5px; padding: 6px 8px;
-  font: 10.5px/1.4 ui-monospace, SFMono-Regular, monospace;
-  white-space: pre-wrap; word-break: break-word; color: #c9d4e4;
+  font: 11px/1.4 var(--finesse-mono);
+  white-space: pre-wrap; word-break: break-word; color: var(--finesse-surface-fg);
 }
 .finesse-composer-input {
-  font: inherit; font-size: 12px; color: #e8ecf3;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;
+  font: inherit; font-size: 12.5px; color: var(--finesse-input-fg);
+  background: var(--finesse-input-bg);
+  border: 1px solid var(--finesse-input-border); border-radius: 6px;
   padding: 7px 8px; resize: vertical; min-height: 44px; outline: none;
 }
-.finesse-composer-input:focus { border-color: #4c8dff; }
-.finesse-composer-input::placeholder { color: #8a96a8; }
-.finesse-composer-hint { font-size: 10.5px; line-height: 1.4; color: #8fa0b8; opacity: 0.9; }
+.finesse-composer-input:focus { border-color: var(--finesse-focus); }
+.finesse-composer-input::placeholder { color: var(--finesse-placeholder); }
+.finesse-composer-hint { font-size: 11px; line-height: 1.4; color: var(--finesse-muted); }
 .finesse-composer-actions { display: flex; align-items: center; gap: 7px; }
 .finesse-act {
-  font: 600 11px/1 system-ui, -apple-system, sans-serif;
+  font: 600 11.5px/1 var(--finesse-font);
   border-radius: 5px; padding: 6px 11px; cursor: pointer; border: none;
 }
-.finesse-act-primary { background: #2f6fe0; color: #fff; }
-.finesse-act-primary:hover { background: #3a7cf0; }
-.finesse-act-ghost { background: rgba(255,255,255,0.07); color: #e8ecf3; border: 1px solid rgba(255,255,255,0.14); }
-.finesse-act-ghost:hover { background: rgba(255,255,255,0.12); }
-.finesse-act-link { background: transparent; color: #ff9a9a; padding: 6px 4px; margin-left: auto; }
-.finesse-act-link:hover { text-decoration: underline; }
+.finesse-act-primary { background: var(--finesse-accent); color: var(--finesse-accent-fg); }
+.finesse-act-primary:hover { background: var(--finesse-accent-hover); }
+.finesse-act-ghost { background: transparent; color: inherit; border: 1px solid var(--finesse-surface-border); }
+.finesse-act-ghost:hover { background: rgba(128,128,128,0.15); }
+/* Pin removal is housekeeping (the file keeps its changes) — keep it quiet. */
+.finesse-act-link { background: transparent; color: var(--finesse-muted); padding: 6px 4px; margin-left: auto; }
+.finesse-act-link:hover { text-decoration: underline; color: var(--finesse-surface-fg); }
 `;

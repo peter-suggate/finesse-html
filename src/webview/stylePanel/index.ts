@@ -280,13 +280,13 @@ const SP_CSS = `
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
   background: var(--vscode-sideBarSectionHeader-background, transparent);
 }
 .sp-tag {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--vscode-textLink-foreground, #4cb6ff);
   background: var(--vscode-badge-background, rgba(76, 182, 255, 0.14));
@@ -295,7 +295,7 @@ const SP_CSS = `
 }
 .sp-meta {
   flex: 1;
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.7;
   white-space: nowrap;
   overflow: hidden;
@@ -325,9 +325,9 @@ const SP_CSS = `
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 7px 14px;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -350,7 +350,7 @@ const SP_CSS = `
 .sp-summary:hover { opacity: 1; }
 
 .sp-content {
-  padding: 6px 10px 10px 10px;
+  padding: 6px 14px 10px 14px;
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -363,7 +363,7 @@ const SP_CSS = `
   gap: 6px;
 }
 .sp-row > label {
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.7;
 }
 
@@ -376,7 +376,7 @@ const SP_CSS = `
 
 .sp-input {
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--vscode-input-foreground, inherit);
   background: var(--vscode-input-background, transparent);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
@@ -415,7 +415,7 @@ const SP_CSS = `
 .sp-select {
   appearance: none;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--vscode-input-foreground, inherit);
   background: var(--vscode-input-background, transparent);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.3)));
@@ -480,7 +480,7 @@ const SP_CSS = `
   border: none;
   color: inherit;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 6px;
   border-radius: 2px;
   cursor: pointer;
@@ -557,7 +557,7 @@ const SP_CSS = `
 
 .sp-empty {
   padding: 24px 16px;
-  font-size: 11.5px;
+  font-size: 12.5px;
   text-align: center;
   line-height: 1.5;
   opacity: 0.55;
@@ -594,9 +594,9 @@ const SP_CSS = `
   appearance: none;
   background: transparent;
   border: none;
-  padding: 1px 4px;
+  padding: 2px 5px;
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--vscode-foreground, inherit);
   opacity: 0.62;
   cursor: pointer;
@@ -634,8 +634,8 @@ button.sp-crumb:hover {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 1px 2px 1px 6px;
-  font-size: 11px;
+  padding: 2px 3px 2px 7px;
+  font-size: 12px;
   line-height: 16px;
   color: var(--vscode-textLink-foreground, #4cb6ff);
   background: var(--vscode-badge-background, rgba(76, 182, 255, 0.14));
@@ -646,7 +646,7 @@ button.sp-crumb:hover {
 }
 .sp-chip-label {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 10.5px;
+  font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -669,7 +669,7 @@ button.sp-crumb:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
 }
 .sp-chips-empty {
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.45;
   font-style: italic;
 }
@@ -704,9 +704,9 @@ button.sp-crumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground, rgba(128,128,128,0.55));
 }
 .sp-dropdown-item {
-  padding: 3px 8px;
+  padding: 4px 9px;
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11.5px;
+  font-size: 12.5px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -725,7 +725,7 @@ button.sp-crumb:hover {
 }
 .sp-classrule-title {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--vscode-textLink-foreground, #4cb6ff);
   text-transform: none;
   letter-spacing: 0;
@@ -759,7 +759,7 @@ button.sp-crumb:hover {
   border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.18));
 }
 .sp-classrule-empty {
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.55;
   font-style: italic;
   padding: 2px 0;
@@ -772,7 +772,7 @@ button.sp-crumb:hover {
 }
 .sp-decl-prop {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.78;
   white-space: nowrap;
   overflow: hidden;
@@ -780,7 +780,7 @@ button.sp-crumb:hover {
 }
 .sp-decl-value {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
+  font-size: 12px;
 }
 .sp-decl-remove {
   appearance: none;
@@ -812,7 +812,7 @@ button.sp-crumb:hover {
 .sp-decl-add-prop,
 .sp-decl-add-value {
   font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, monospace);
-  font-size: 11px;
+  font-size: 12px;
 }
 .sp-decl-add-prop::placeholder,
 .sp-decl-add-value::placeholder {

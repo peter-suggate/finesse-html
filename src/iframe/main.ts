@@ -7,6 +7,7 @@ import type {
 import { setupEditSession, type EditSession } from './editSession';
 import { setupHelpPanel } from './helpPanel';
 import { setupOverlay } from './overlay';
+import { applyFinesseTheme, installThemeDefaults } from './theme';
 import { setupThreadPins, type ThreadPinsController } from './threadPins';
 import { setupFormatToolbar } from './toolbar';
 import { makeDefaultActionHandler, makeDefaultRefreshHandler } from './toolbar/wiring';
@@ -43,6 +44,7 @@ function reportError(input: {
 
 function start(): void {
   setupGlobalErrorHandlers();
+  installThemeDefaults();
   const init = window.__FINESSE__;
   if (!init) {
     reportError({ source: 'finesse', message: 'init data missing (window.__FINESSE__)' });
@@ -206,6 +208,9 @@ function setupHostMessageListener(session: EditSession, pins: ThreadPinsControll
         break;
       case 'focusThreadPin':
         pins.focusThread(data.threadId);
+        break;
+      case 'finesseTheme':
+        applyFinesseTheme(data);
         break;
       case 'staleCommit':
         session.onStale();

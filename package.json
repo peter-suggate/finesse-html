@@ -36,47 +36,59 @@
     "commands": [
       {
         "command": "finesse.openPreview",
-        "title": "Finesse: Open Preview"
+        "title": "Open Preview",
+        "category": "Finesse",
+        "icon": "$(open-preview)"
       },
       {
         "command": "finesse.openDevServerPreview",
-        "title": "Finesse: Open Dev Server Preview"
+        "title": "Open Dev Server Preview",
+        "category": "Finesse"
       },
       {
         "command": "finesse.closePreview",
-        "title": "Finesse: Close Preview"
+        "title": "Close Preview",
+        "category": "Finesse"
       },
       {
         "command": "finesse.editAnyway",
-        "title": "Finesse: Edit Templated File Anyway"
+        "title": "Edit Templated File Anyway",
+        "category": "Finesse"
       },
       {
         "command": "finesse.connectCursorAgent",
-        "title": "Finesse: Connect Cursor Agent"
+        "title": "Connect Cursor Agent",
+        "category": "Finesse"
       },
       {
         "command": "finesse.disconnectCursorAgent",
-        "title": "Finesse: Disconnect Cursor Agent"
+        "title": "Disconnect Cursor Agent",
+        "category": "Finesse"
       },
       {
         "command": "finesse.cursorAgentStatus",
-        "title": "Finesse: Show Cursor Agent Connection Status"
+        "title": "Show Cursor Agent Connection Status",
+        "category": "Finesse"
       },
       {
         "command": "finesse.connectClaudeAgent",
-        "title": "Finesse: Connect Claude Code"
+        "title": "Connect Claude Code",
+        "category": "Finesse"
       },
       {
         "command": "finesse.disconnectClaudeAgent",
-        "title": "Finesse: Disconnect Claude Code"
+        "title": "Disconnect Claude Code",
+        "category": "Finesse"
       },
       {
         "command": "finesse.claudeAgentStatus",
-        "title": "Finesse: Show Claude Code Connection Status"
+        "title": "Show Claude Code Connection Status",
+        "category": "Finesse"
       },
       {
         "command": "finesse.selectAgentProvider",
-        "title": "Finesse: Select Agent Provider"
+        "title": "Select Agent Provider",
+        "category": "Finesse"
       }
     ],
     "configuration": {
@@ -160,6 +172,37 @@
           "description": "Which agent runs when you press Send in the Ask Agent panel."
         }
       }
+    },
+    "keybindings": [
+      {
+        "command": "finesse.openPreview",
+        "key": "ctrl+k v",
+        "mac": "cmd+k v",
+        "when": "editorTextFocus && (editorLangId == html || editorLangId == javascriptreact || editorLangId == typescriptreact || editorLangId == javascript || editorLangId == typescript)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "finesse.openPreview",
+          "group": "navigation",
+          "when": "resourceLangId == html || resourceExtname == .jsx || resourceExtname == .tsx"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "finesse.openPreview",
+          "group": "navigation",
+          "when": "resourceLangId == html"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "finesse.openPreview",
+          "group": "navigation",
+          "when": "resourceExtname == .html || resourceExtname == .htm"
+        }
+      ]
     }
   },
   "scripts": {
@@ -175,12 +218,10 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.139",
-    "@babel/parser": "^7.29.3",
-    "@cursor/sdk": "^1.0.12",
-    "parse5": "^7.1.2",
-    "ws": "^8.18.0"
+    "@cursor/sdk": "^1.0.12"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.3",
     "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.59.1",
     "@types/node": "^20.12.7",
@@ -190,10 +231,12 @@
     "esbuild": "^0.20.2",
     "eslint": "^9.0.0",
     "ovsx": "^0.9.1",
+    "parse5": "^7.1.2",
     "prettier": "^3.2.5",
     "rimraf": "^5.0.5",
     "typescript": "^5.4.5",
     "typescript-eslint": "^8.0.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "ws": "^8.18.0"
   }
 }

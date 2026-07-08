@@ -54,6 +54,12 @@ export interface EditThread {
   id: string;
   anchor: ElementAnchor;
   status: EditThreadStatus;
+  /**
+   * Stable 1-based number assigned by the engine at creation. Never reused
+   * within a session so UI labels ("Edit 2") stay meaningful after deletes.
+   * Optional because threads persisted by older versions predate it.
+   */
+  ordinal?: number;
   /** Provider pinned at creation. */
   providerId: AgentProviderId;
   /** Ordered instructions: first is the initial prompt, rest are steers. */

@@ -23,3 +23,6 @@ SPEC.md
 .vscode/
 .vscode-test/
 **/.DS_Store
+*.vsix
+package-lock.json
+**/*.map

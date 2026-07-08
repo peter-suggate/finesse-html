@@ -1,3 +1,5 @@
+import { modKey } from '../shared/keys';
+
 export interface StatusState {
   file?: string;
   version?: number;
@@ -20,8 +22,6 @@ export interface StatusActions {
 let state: StatusState = {};
 let elRoot: HTMLElement | null = null;
 let elFile: HTMLElement | null = null;
-let elVersion: HTMLElement | null = null;
-let elPort: HTMLElement | null = null;
 let elLocked: HTMLElement | null = null;
 let elDirty: HTMLElement | null = null;
 let elSave: HTMLButtonElement | null = null;
@@ -34,8 +34,6 @@ let elSaveState: HTMLElement | null = null;
 export function initStatus(initial: StatusState, actions?: StatusActions): void {
   elRoot = document.getElementById('status');
   elFile = document.getElementById('status-file');
-  elVersion = document.getElementById('status-version');
-  elPort = document.getElementById('status-port');
   elLocked = document.getElementById('status-locked');
   elDirty = document.getElementById('status-dirty');
   elSave = document.getElementById('status-save') as HTMLButtonElement | null;
@@ -56,8 +54,13 @@ export function initStatus(initial: StatusState, actions?: StatusActions): void 
 export function updateStatus(patch: StatusState): void {
   state = { ...state, ...patch };
   if (elFile && state.file !== undefined) elFile.textContent = state.file;
-  if (elVersion && state.version !== undefined) elVersion.textContent = `v${state.version}`;
-  if (elPort && state.port !== undefined) elPort.textContent = `:${state.port}`;
+  if (elFile) {
+    // Version/port are debug detail — keep them reachable but out of the strip.
+    const details: string[] = [];
+    if (state.version !== undefined) details.push(`document v${state.version}`);
+    if (state.port !== undefined) details.push(`server :${state.port}`);
+    elFile.title = [state.file, details.join(' · ')].filter(Boolean).join('\n');
+  }
   if (elLocked) elLocked.hidden = !state.locked;
   if (elRoot) elRoot.classList.toggle('is-dirty', !!state.isDirty);
   if (elDirty) elDirty.classList.toggle('is-dirty', !!state.isDirty);
@@ -68,7 +71,9 @@ export function updateStatus(patch: StatusState): void {
     elSave.disabled = !state.isDirty;
     elSave.textContent = state.isDirty ? 'Save now' : 'Saved';
     elSave.classList.toggle('primary', !!state.isDirty);
-    elSave.title = state.isDirty ? 'Save changes to disk (⌘S)' : 'No unsaved changes';
+    elSave.title = state.isDirty
+      ? `Save changes to disk (${modKey('S')})`
+      : 'No unsaved changes';
     elSave.setAttribute(
       'aria-label',
       state.isDirty ? 'Save changes to disk' : 'No unsaved changes',

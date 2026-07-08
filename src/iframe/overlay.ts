@@ -7,11 +7,14 @@ export interface OverlayOpts {
   onStartEdit?: (el: HTMLElement) => void;
 }
 
+// All chrome colors come from the shared --finesse-* tokens (see theme.ts):
+// defaults are installed at boot and the webview overrides them with the
+// live VS Code theme, so these affordances match the editor's look.
 const HOVER_STYLE: Partial<CSSStyleDeclaration> = {
   position: 'fixed',
   pointerEvents: 'none',
-  border: '1px solid #4a90e2',
-  background: 'rgba(74, 144, 226, 0.06)',
+  border: '1px solid var(--finesse-focus)',
+  background: 'color-mix(in srgb, var(--finesse-focus) 7%, transparent)',
   borderRadius: '2px',
   zIndex: '2147483640',
   display: 'none',
@@ -21,7 +24,7 @@ const HOVER_STYLE: Partial<CSSStyleDeclaration> = {
 const SELECTION_STYLE: Partial<CSSStyleDeclaration> = {
   position: 'fixed',
   pointerEvents: 'none',
-  border: '2px solid #1e6fd9',
+  border: '2px solid var(--finesse-focus)',
   borderRadius: '2px',
   zIndex: '2147483641',
   display: 'none',
@@ -33,10 +36,10 @@ const DELETE_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
   height: '16px',
   lineHeight: '14px',
   textAlign: 'center',
-  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontFamily: 'var(--finesse-font)',
   fontSize: '13px',
   fontWeight: '300',
-  color: '#1e6fd9',
+  color: 'var(--finesse-focus)',
   background: 'transparent',
   border: 'none',
   borderRadius: '0',
@@ -54,19 +57,19 @@ const EDIT_BUTTON_STYLE: Partial<CSSStyleDeclaration> = {
   display: 'none',
   alignItems: 'center',
   gap: '3px',
-  height: '18px',
-  fontFamily: 'system-ui, -apple-system, sans-serif',
+  height: '20px',
+  fontFamily: 'var(--finesse-font)',
   fontSize: '11px',
   fontWeight: '600',
-  lineHeight: '18px',
-  color: '#ffffff',
-  background: 'rgba(30, 111, 217, 0.95)',
+  lineHeight: '20px',
+  color: 'var(--finesse-accent-fg)',
+  background: 'var(--finesse-accent)',
   border: 'none',
-  borderRadius: '9px',
+  borderRadius: '10px',
   cursor: 'pointer',
-  padding: '0 8px',
+  padding: '0 9px',
   zIndex: '2147483642',
-  boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
+  boxShadow: 'var(--finesse-shadow-small)',
   userSelect: 'none',
   whiteSpace: 'nowrap',
   transition: 'opacity 100ms ease-out, background 100ms ease-out',
@@ -86,40 +89,40 @@ const INTERACT_TOGGLE_BASE_STYLE: Partial<CSSStyleDeclaration> = {
   zIndex: '2147483643',
   padding: '4px 11px',
   borderRadius: '999px',
-  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontFamily: 'var(--finesse-font)',
   fontSize: '11px',
   lineHeight: '16px',
   cursor: 'pointer',
   userSelect: 'none',
-  boxShadow: '0 2px 8px rgba(0,0,0,0.22)',
+  boxShadow: 'var(--finesse-shadow-small)',
   transition: 'background 120ms ease-out, color 120ms ease-out',
 };
 
 const INTERACT_TOGGLE_OFF_STYLE: Partial<CSSStyleDeclaration> = {
-  color: 'rgba(244, 247, 251, 0.92)',
-  background: 'rgba(20, 24, 32, 0.78)',
-  border: '1px solid rgba(255, 255, 255, 0.10)',
+  color: 'var(--finesse-surface-fg)',
+  background: 'var(--finesse-surface)',
+  border: '1px solid var(--finesse-surface-border)',
 };
 
 const INTERACT_TOGGLE_ON_STYLE: Partial<CSSStyleDeclaration> = {
-  color: '#ffffff',
-  background: 'rgba(30, 111, 217, 0.95)',
-  border: '1px solid rgba(30, 111, 217, 0.95)',
+  color: 'var(--finesse-accent-fg)',
+  background: 'var(--finesse-accent)',
+  border: '1px solid var(--finesse-accent)',
 };
 
 const NATIVE_CLICK_HINT_STYLE: Partial<CSSStyleDeclaration> = {
   position: 'fixed',
   pointerEvents: 'none',
   padding: '2px 6px',
-  fontFamily: 'system-ui, -apple-system, sans-serif',
+  fontFamily: 'var(--finesse-font)',
   fontSize: '11px',
   lineHeight: '16px',
-  color: '#ffffff',
-  background: 'rgba(30, 111, 217, 0.92)',
+  color: 'var(--finesse-accent-fg)',
+  background: 'var(--finesse-accent)',
   borderRadius: '3px',
   zIndex: '2147483643',
   display: 'none',
-  boxShadow: '0 1px 4px rgba(0,0,0,0.22)',
+  boxShadow: 'var(--finesse-shadow-small)',
   whiteSpace: 'nowrap',
 };
 
@@ -138,7 +141,6 @@ export function setupOverlay(opts: OverlayOpts): void {
   document.body.appendChild(nativeClickHint);
   document.body.appendChild(interactToggle);
 
-  let hoveredEl: HTMLElement | null = null;
   let focusedEl: HTMLElement | null = null;
   let selectedEl: HTMLElement | null = null;
   let lastHoverTarget: HTMLElement | null = null;
@@ -181,8 +183,11 @@ export function setupOverlay(opts: OverlayOpts): void {
     return el.getBoundingClientRect();
   }
 
+  // Destructive affordances only attach to a *committed* selection (click or
+  // keyboard focus), never a passing hover — a hover-borne delete button
+  // reads as "close" and invites accidents.
   function deleteTargetEl(): HTMLElement | null {
-    return selectedEl ?? hoveredEl ?? focusedEl;
+    return selectedEl ?? focusedEl;
   }
 
   function refreshDeleteButton(): void {
@@ -212,7 +217,7 @@ export function setupOverlay(opts: OverlayOpts): void {
     // overlap their own hit area. It sits just left of delete.
     if (opts.onStartEdit && el === selectedEl && !isInteractiveClickTarget(el)) {
       editBtn.style.display = 'inline-flex';
-      const w = editBtn.offsetWidth || 56;
+      const w = editBtn.offsetWidth || 72;
       editBtn.style.left = `${Math.max(0, r.right - 22 - w)}px`;
       editBtn.style.top = `${Math.max(0, r.top + 1)}px`;
     } else {
@@ -220,8 +225,9 @@ export function setupOverlay(opts: OverlayOpts): void {
     }
   }
 
-  function setHoveredEl(el: HTMLElement | null): void {
-    hoveredEl = el;
+  // Hover no longer feeds the delete/AI buttons (they attach to committed
+  // selections only), but hover transitions still need to re-evaluate them.
+  function setHoveredEl(_el: HTMLElement | null): void {
     refreshDeleteButton();
   }
 
@@ -343,11 +349,11 @@ export function setupOverlay(opts: OverlayOpts): void {
 
   deleteBtn.addEventListener('mouseenter', () => {
     deleteBtn.style.opacity = '1';
-    deleteBtn.style.color = '#d14545';
+    deleteBtn.style.color = 'var(--finesse-danger)';
   });
   deleteBtn.addEventListener('mouseleave', () => {
     deleteBtn.style.opacity = '0.55';
-    deleteBtn.style.color = '#1e6fd9';
+    deleteBtn.style.color = 'var(--finesse-focus)';
   });
 
   deleteBtn.addEventListener('mousedown', (e) => {
@@ -561,6 +567,19 @@ export function setupOverlay(opts: OverlayOpts): void {
       session.requestCommandPalette();
       return;
     }
+    // Cmd/Ctrl+. (or legacy Cmd/Ctrl+\\): toggle the side dock, mirroring the
+    // same shortcut handled by the webview chrome when it has focus.
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.shiftKey &&
+      !e.altKey &&
+      (e.key === '.' || e.key === '\\')
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      session.requestToggleDock();
+      return;
+    }
     // Cmd/Ctrl+S: commit any active edit, then ask host to save.
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
@@ -722,14 +741,22 @@ export function setupOverlay(opts: OverlayOpts): void {
     sanitizePaste(e);
   });
 
+  // Scroll/resize: hover chrome is transient and just hides, but the
+  // committed selection *tracks* its element (like the thread pins do) so
+  // scrolling never silently drops what the side panel is editing.
   const reposition = (): void => {
     hover.style.display = 'none';
-    showSelection(null);
     nativeClickHint.style.display = 'none';
     lastHoverTarget = null;
     setHoveredEl(null);
-    setFocusedEl(null);
-    setSelectedEl(null);
+    const tracked = selectedEl ?? focusedEl;
+    if (tracked && tracked.isConnected) {
+      showSelection(tracked);
+    } else {
+      setFocusedEl(null);
+      setSelectedEl(null);
+      showSelection(null);
+    }
   };
   window.addEventListener('resize', reposition);
   window.addEventListener('scroll', reposition, true);
@@ -848,16 +875,17 @@ function createEditButton(): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.id = 'finesse-edit-launch';
   btn.type = 'button';
-  btn.title = 'Start an AI edit on this element';
-  btn.setAttribute('aria-label', 'Start an AI edit on this element');
-  // Sparkle glyph + label, mirroring the deck's "AI edit" affordance.
-  btn.innerHTML = '<span aria-hidden="true">✦</span><span>Edit</span>';
+  btn.title = 'Ask AI to edit this element';
+  btn.setAttribute('aria-label', 'Ask AI to edit this element');
+  // "Ask AI", not "Edit" — a plain click already starts a *text* edit, so the
+  // launcher must not reuse that word.
+  btn.innerHTML = '<span aria-hidden="true">✦</span><span>Ask AI</span>';
   Object.assign(btn.style, EDIT_BUTTON_STYLE);
   btn.addEventListener('mouseenter', () => {
-    btn.style.background = 'rgba(40, 124, 240, 1)';
+    btn.style.background = 'var(--finesse-accent-hover)';
   });
   btn.addEventListener('mouseleave', () => {
-    btn.style.background = 'rgba(30, 111, 217, 0.95)';
+    btn.style.background = 'var(--finesse-accent)';
   });
   return btn;
 }

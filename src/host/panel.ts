@@ -57,6 +57,7 @@ import {
   walkEditable,
   walkEditableInJs,
 } from './parse';
+import { previewHostForDevServerUrl } from './previewHost';
 import { injectElementIds } from './server/inject';
 
 const JS_LANGUAGE_IDS: ReadonlySet<string> = new Set([
@@ -473,10 +474,14 @@ function createPreviewPanelFromSource(
   });
 
   const initialPage = activePage();
+  const previewHost =
+    initialPage.renderMode === 'react'
+      ? previewHostForDevServerUrl(deps.getConfig().reactDevServerUrl)
+      : '127.0.0.1';
   const iframeUrl =
     initialPage.renderMode === 'react' && deps.getConfig().reactDevServerUrl
-      ? `http://127.0.0.1:${deps.port}/__react?source=${encodeURIComponent(relativePath)}`
-      : `http://127.0.0.1:${deps.port}/${encodePath(relativePath)}`;
+      ? `http://${previewHost}:${deps.port}/__react?source=${encodeURIComponent(relativePath)}`
+      : `http://${previewHost}:${deps.port}/${encodePath(relativePath)}`;
   const fileMeta: FileMeta = {
     type: 'fileMeta',
     path: relativePath,
@@ -521,6 +526,7 @@ function createPreviewPanelFromSource(
       id: thread.id,
       status: thread.status,
       providerId: thread.providerId,
+      ordinal: thread.ordinal,
       tagName: thread.anchor.tagName,
       textPreview: thread.anchor.textPreview,
       domPath: thread.anchor.domPath,
@@ -528,6 +534,7 @@ function createPreviewPanelFromSource(
       elementId: thread.anchor.lastKnownElementId,
       path: thread.anchor.path,
       promptCount: thread.prompts.length,
+      prompts: thread.prompts.map((p) => ({ text: p.text, at: p.at, midRun: p.midRun })),
       runLogTail: thread.runLogTail,
       error: thread.error,
       errorKind: thread.errorKind,
@@ -1827,6 +1834,11 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
     .asWebviewUri(vscode.Uri.file(path.join(extensionPath, 'dist', 'webview', 'main.js')))
     .toString();
   const initJson = JSON.stringify(init).replace(/<\//g, '<\\/');
+  // The host runs on the same machine as the renderer, so platform-correct
+  // shortcut labels in static markup can come from the extension process.
+  const isMacHost = process.platform === 'darwin';
+  const mod = (key: string): string => (isMacHost ? `⌘${key}` : `Ctrl+${key}`);
+  const shiftMod = (key: string): string => (isMacHost ? `⇧⌘${key}` : `Ctrl+Shift+${key}`);
   const csp = [
     "default-src 'none'",
     `img-src ${webview.cspSource} https: data:`,
@@ -1866,21 +1878,132 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
       .banner button:hover { background: var(--vscode-button-hoverBackground); }
       .banner .dismiss { margin-left: auto; opacity: 0.6; cursor: pointer; padding: 0 4px; }
       .banner .dismiss:hover { opacity: 1; }
-      #main-row { flex: 1; display: flex; flex-direction: row; min-height: 0; }
+      #main-row { --dock-w: 400px; flex: 1; display: flex; flex-direction: row; min-height: 0; }
       #frame-wrap { flex: 1; position: relative; min-width: 0; }
       #frame { width: 100%; height: 100%; border: none; background: white; }
+
+      /* Drag handle between preview and the side pane. */
+      #dock-resize {
+        flex: 0 0 5px;
+        cursor: col-resize;
+        background: transparent;
+        border-left: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+        transition: background 90ms ease-out;
+        touch-action: none;
+      }
+      #dock-resize:hover, #dock-resize.is-dragging { background: var(--vscode-focusBorder, #4c8dff); }
+
       #side-dock {
         display: flex;
         flex-direction: column;
-        flex: 0 0 264px;
-        width: 264px;
+        flex: 0 0 var(--dock-w);
+        width: var(--dock-w);
+        min-width: 0;
         min-height: 0;
-        border-left: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
         background: var(--vscode-sideBar-background, var(--vscode-editor-background));
         color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground));
         font-family: var(--vscode-font-family);
-        font-size: 12px;
+        font-size: 13px;
       }
+
+      /* Header strip: tab bar + collapse affordance. */
+      .dock-toolbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+        padding: 0 8px 0 6px;
+        border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+        background: var(--vscode-sideBarSectionHeader-background, transparent);
+      }
+      .dock-tabs {
+        flex: 1;
+        display: flex;
+        align-items: stretch;
+        gap: 2px;
+      }
+      .dock-tab {
+        position: relative;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        background: transparent;
+        color: inherit;
+        border: none;
+        border-bottom: 2px solid transparent;
+        padding: 8px 12px 6px;
+        cursor: pointer;
+        opacity: 0.6;
+      }
+      .dock-tab:hover { opacity: 0.9; }
+      .dock-tab[aria-selected="true"] {
+        opacity: 1;
+        border-bottom-color: var(--vscode-panelTitle-activeBorder, var(--vscode-focusBorder, #4c8dff));
+      }
+      /* Small dot cueing activity on a hidden tab (selection, running edit). */
+      .dock-tab .dock-tab-badge {
+        display: none;
+        position: absolute;
+        top: 7px;
+        right: 3px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--vscode-charts-blue, #4c8dff);
+      }
+      .dock-tab.has-badge .dock-tab-badge { display: block; }
+      .dock-toolbar .dock-collapse {
+        align-self: center;
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        background: transparent;
+        color: inherit;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        padding: 2px 7px;
+        cursor: pointer;
+        opacity: 0.7;
+      }
+      .dock-toolbar .dock-collapse:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.07)); }
+
+      /* The tab panes live here, below the toolbar. One pane visible at a time. */
+      #dock-panels { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+      .dock-pane { flex: 1 1 auto; min-height: 0; display: none; flex-direction: column; }
+      .dock-pane.is-active { display: flex; }
+
+      /* Thin edge rail shown when the pane is collapsed. */
+      #dock-rail {
+        flex: 0 0 36px;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 0;
+        cursor: pointer;
+        border-left: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+        background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+        color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground));
+      }
+      #dock-rail:hover { background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.05)); }
+      #dock-rail .rail-chevron { font-size: 15px; line-height: 1; opacity: 0.8; }
+      #dock-rail .rail-label {
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        transform: rotate(180deg);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.7;
+        white-space: nowrap;
+      }
+
+      /* Collapsed state: hide handle + pane, reveal the rail. */
+      #main-row[data-dock-collapsed] #dock-resize,
+      #main-row[data-dock-collapsed] #side-dock { display: none; }
+      #main-row[data-dock-collapsed] #dock-rail { display: flex; }
     </style>
     <script>window.__FINESSE_INIT__ = ${initJson};</script>
   </head>
@@ -1888,23 +2011,38 @@ function buildWebviewHtml(webview: vscode.Webview, extensionPath: string, init: 
     <div id="status" role="status">
       <span id="status-dirty" class="dirty-dot" aria-hidden="true">●</span>
       <span id="status-file" class="muted">no file</span>
-      <span id="status-version" class="muted">v?</span>
-      <span id="status-port" class="muted">-</span>
 		      <span id="status-locked" class="muted" hidden>editing locked</span>
 		      <span id="status-selection" class="muted selection" hidden>no selection</span>
 		      <span id="status-save-state" class="save-state">Saved</span>
 		      <span class="grow"></span>
       <button id="status-discard" class="tool" type="button" title="Discard unsaved changes" disabled>Discard</button>
-      <button id="status-undo" class="tool" type="button" title="Undo Finesse edit (⌘Z)" disabled>Undo</button>
-      <button id="status-redo" class="tool" type="button" title="Redo Finesse edit (⇧⌘Z)" disabled>Redo</button>
-      <button id="status-save" class="tool" type="button" title="Save (⌘S)" disabled>Save</button>
+      <button id="status-undo" class="tool" type="button" title="Undo Finesse edit (${mod('Z')})" disabled>Undo</button>
+      <button id="status-redo" class="tool" type="button" title="Redo Finesse edit (${shiftMod('Z')})" disabled>Redo</button>
+      <button id="status-save" class="tool" type="button" title="Save (${mod('S')})" disabled>Save</button>
     </div>
     <div id="banners" role="region" aria-label="Finesse notifications" aria-live="polite"></div>
     <div id="main-row">
       <div id="frame-wrap">
         <iframe id="frame" title="HTML preview" aria-label="HTML preview" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
       </div>
-      <div id="side-dock" aria-label="Style panel"></div>
+      <div id="dock-resize" role="separator" aria-orientation="vertical" aria-label="Resize panel" title="Drag to resize"></div>
+      <div id="side-dock" aria-label="Finesse panel">
+        <div class="dock-toolbar">
+          <div class="dock-tabs" role="tablist" aria-label="Finesse panel tabs">
+            <button id="dock-tab-ai" class="dock-tab" type="button" role="tab" aria-selected="true" aria-controls="dock-pane-ai">AI<span class="dock-tab-badge" aria-hidden="true"></span></button>
+            <button id="dock-tab-design" class="dock-tab" type="button" role="tab" aria-selected="false" aria-controls="dock-pane-design">Design<span class="dock-tab-badge" aria-hidden="true"></span></button>
+          </div>
+          <button id="dock-collapse" class="dock-collapse" type="button" title="Hide panel (${mod('.')})" aria-label="Hide panel">›</button>
+        </div>
+        <div id="dock-panels">
+          <section id="dock-pane-ai" class="dock-pane is-active" role="tabpanel" aria-label="AI edits"></section>
+          <section id="dock-pane-design" class="dock-pane" role="tabpanel" aria-label="Element design"></section>
+        </div>
+      </div>
+      <div id="dock-rail" role="button" tabindex="0" aria-label="Show panel" title="Show panel (${mod('.')})">
+        <span class="rail-chevron" aria-hidden="true">‹</span>
+        <span class="rail-label">Finesse</span>
+      </div>
     </div>
     <script src="${mainJs}"></script>
   </body>

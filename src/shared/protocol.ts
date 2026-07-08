@@ -201,11 +201,30 @@ export type EditThreadStatus =
   | 'error'
   | 'stale';
 
+/** One instruction in a thread's history (initial prompt, then steers). */
+export type ThreadPromptView = {
+  text: string;
+  at: number;
+  /** True if added while a run was in flight (applies to the next run). */
+  midRun: boolean;
+};
+
 /** One thread's observable state, as seen by the webview chrome and iframe. */
 export type EditThreadView = {
   id: string;
   status: EditThreadStatus;
   providerId: AgentProviderId;
+  /**
+   * Stable 1-based number assigned at creation. Never renumbers when other
+   * threads are removed, so "Edit 2" keeps meaning the same edit. Optional
+   * for compatibility with older snapshots; consumers fall back to list index.
+   */
+  ordinal?: number;
+  /**
+   * Ordered instruction history: the initial prompt first, steers after.
+   * Optional for compatibility; older snapshots carry only `promptCount`.
+   */
+  prompts?: ThreadPromptView[];
   /** Target tag (lowercase) for pin/card labels; `'page'` for page-level threads. */
   tagName: string;
   /** Trimmed innerText preview of the target element. */
@@ -413,6 +432,13 @@ export type RedoRequest = DocumentScopedMessage & { type: 'redoRequest' };
 /** Iframe asks host to open the editor command palette. */
 export type CommandPaletteRequest = { type: 'commandPaletteRequest' };
 
+/**
+ * Iframe asks the surrounding webview chrome to toggle the side dock, so the
+ * panel shortcut works no matter which document currently has focus. Handled
+ * entirely in the webview — never forwarded to the host. (ADDITIVE)
+ */
+export type ToggleDockRequest = { type: 'toggleDockRequest' };
+
 export interface ElementStyleSnapshot {
   /** Raw `style="…"` attribute value, or null if absent. */
   inlineStyle: string | null;
@@ -578,6 +604,7 @@ export type IframeMessage =
   | UndoRequest
   | RedoRequest
   | CommandPaletteRequest
+  | ToggleDockRequest
   | ElementSelectionChanged
   | AnchorResolved
   | ThreadPinRects
@@ -641,12 +668,26 @@ export type FocusThreadPin = {
   threadId: string;
 };
 
+/**
+ * Chrome forwards the resolved VS Code theme to the iframe so the injected
+ * Finesse chrome (pins, composers, selection ring, help panel) can match the
+ * editor instead of shipping its own hard-coded palette. Sent once after the
+ * iframe reports ready and again whenever the editor theme changes. Values
+ * are plain CSS color/font strings; the iframe maps them onto `--finesse-*`
+ * custom properties with sensible fallbacks. (ADDITIVE)
+ */
+export type FinesseTheme = {
+  type: 'finesseTheme';
+  tokens: Record<string, string>;
+};
+
 export type ChromeIframeMessage =
   | PanelStyleEdit
   | PanelCssEdit
   | PanelSelectElement
   | ChromeModifierKey
-  | FocusThreadPin;
+  | FocusThreadPin
+  | FinesseTheme;
 
 /** Everything the iframe's window-message listener may receive. */
 export type IframeInboundMessage = HostMessage | ChromeIframeMessage;
